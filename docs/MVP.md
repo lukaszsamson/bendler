@@ -46,9 +46,14 @@ functions. In order:
       in CI.
 - [ ] Memory budgets, not only counts: a decoded-size budget per request
       and a sustained-overload test with RSS watched.
-- [ ] Batched Levenshtein (`the_fuzz` as reference) with differential
-      correctness tests and end-to-end benchmarks; measure the hand-off
-      again after the admission and deadline changes.
+- [x] (done) Batched Levenshtein (`the_fuzz` as reference) with differential
+      correctness tests and end-to-end benchmarks: `demos/levenshtein/lev.bend`
+      (two-row DP over code points, parallel batch), `demos/levenshtein/test/lev_test.exs`
+      (all `simetric` and `the_fuzz` cases, Unicode code-point checks,
+      batch tests), `demos/levenshtein/bench.exs` (single short pair ~23 µs
+      through the port vs ~1 µs in Elixir; 64×43-char batch ~9 µs/pair
+      vs ~40 µs/pair, ~4x parallel gain). Re-measure the hand-off
+      after the admission and deadline changes.
 - [ ] Document the accepted signature subset, the error contract, Unicode
       semantics (code points, U+FFFD for invalid bytes) and the platform
       matrix.
@@ -112,11 +117,11 @@ small interface, and where Bend's parallelism can show. In order:
    compatibility. Differential tests against the Elixir implementation.
 2. **Murmur3 x86_32**, against the archived `murmur` package. Bytes in,
    U32 out, wrapping arithmetic and endianness. Needs the bytes type; it is
-   the forcing function for it. (done: `bend/murmur.bend` takes bytes as
+   the forcing function for it. (done: `demos/murmur3/murmur.bend` takes bytes as
    `List<U32>` — the interim convention, no codec change — with a
-   parallel `batch_murmur3/2`; `test/murmur_test.exs` reuses every
+   parallel `batch_murmur3/2`; `demos/murmur3/test/murmur_test.exs` reuses every
    x86_32 known answer and boundary vector plus differential fuzz;
-   `bench/murmur_bench.exs` shows hand-off-dominated singles and the
+   `demos/murmur3/bench.exs` shows hand-off-dominated singles and the
    list-transfer cost that the track-3 bytes row must remove.)
 3. **ThumbHash encoding**, against `thumbhash-ex`: keep image IO in
    Elixir, port the RGBA computation. (done: `demos/thumbhash/`, bytes as
