@@ -51,6 +51,23 @@ and the verification runs are in `VALIDATION.md`.
   allocating, on the calling thread for the NIF and before dispatch for
   the port, and only a valid request ever reaches a def.
 
+## Round three: after the first commit
+
+- Credo was configured with an empty enabled set and ran zero checks.
+  Restored the default set with a 120-column limit; the findings it then
+  raised (nesting, complexity, a raise inside a rescue) were fixed.
+- The NIF's Linux deadline waited on a realtime-clock condvar with a
+  monotonic deadline. The condvar is now created with `CLOCK_MONOTONIC`
+  on Linux (macOS uses a relative wait).
+- A request withdrawn on deadline before the loop picked it up left its
+  wake-up byte in the pipe, so an idle loop woke repeatedly. The loop now
+  drains the pipe before deciding whether to park.
+- A port request refused with `:busy` after being popped from the queue
+  left the rest of the queue unscheduled. Dispatch now drains until a
+  request is in flight, the queue is empty, or the port is gone.
+- The claim that omitting `unload` keeps the library loaded was wrong;
+  the docs now say so, and library pinning is an open NIF item.
+
 ## Positions adopted from the reviewer
 
 - The MVP is a reliable CPU port binding generator for bounded pure

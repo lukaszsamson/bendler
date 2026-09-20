@@ -7,7 +7,7 @@ behaviour, not a benchmark or a safety certification.
 
 ## Test suite
 
-`mix test`: **17 tests, 0 failures**, repeated runs with random seeds.
+`mix test`: **18 tests, 0 failures**, repeated runs with random seeds.
 Coverage:
 
 1. Signature parsing: exportable defs, skipped ones with reasons, trailing
@@ -30,6 +30,16 @@ Coverage:
    call; queued callers get `:exited` when the port dies.
 5. The NIF refuses an invalid request on the calling thread with the
    reason text, before anything reaches the runtime.
+6. A NIF request posted but never picked up before its deadline is
+   withdrawn, and the loop parks cleanly afterwards and serves again.
+
+## Static checks
+
+`mix credo --strict` runs the full default check set (69 checks) with a
+120-column line limit and reports no issues; `mix dialyzer` with
+`unmatched_returns`, `missing_return` and `extra_return` reports none;
+`mix compile --warnings-as-errors` and `mix format --check-formatted`
+pass.
 
 ## Build workflows
 

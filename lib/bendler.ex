@@ -149,16 +149,12 @@ defmodule Bendler do
       def __bendler_call(_frame, _timeout_ms), do: :erlang.nif_error(:bendler_not_loaded)
 
       defp __bendler_send__(frame) do
-        __bendler_call(frame, unquote(ms))
-      rescue
-        e in ErlangError ->
-          case e.original do
-            {:bendler_dead, why} ->
-              raise Bendler.Error, message: "the Bend runtime is dead: #{why}", reason: :dead
-
-            _ ->
-              reraise e, __STACKTRACE__
-          end
+        try do
+          __bendler_call(frame, unquote(ms))
+        rescue
+          e in ErlangError -> {:bendler_raised, e, __STACKTRACE__}
+        end
+        |> Bendler.unwrap()
       end
     end
   end
@@ -190,6 +186,14 @@ defmodule Bendler do
       defp __bendler_send__(frame), do: Bendler.Port.call(__MODULE__, frame)
     end
   end
+
+  @doc false
+  def unwrap({:bendler_raised, %ErlangError{original: {:bendler_dead, why}}, _}) do
+    raise Bendler.Error, message: "the Bend runtime is dead: #{why}", reason: :dead
+  end
+
+  def unwrap({:bendler_raised, e, stacktrace}), do: reraise(e, stacktrace)
+  def unwrap(other), do: other
 
   @doc false
   def result({:error, {:invalid, why}}, fun) do

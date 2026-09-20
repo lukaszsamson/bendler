@@ -160,8 +160,12 @@ never has to know the layout of a user constructor.
 - **NIF callers wait on dirty CPU schedulers.** At most `max_waiting` plus
   the one in flight do; size it with your dirty scheduler count in mind.
 - **No reload, upgrade or unload** of a NIF module: the runtime's threads
-  cannot be stopped, so the library must stay loaded for the life of the VM.
-  There is no upgrade callback, so a second `load_nif` is refused.
+  cannot be stopped. Nothing enforces this: purging the module's code can
+  unload the library under threads still running it. Do not purge a module
+  that loaded a Bendler NIF. A second `load_nif` is refused (no upgrade
+  callback).
+- **The NIF deadline** starts after validation and after a dirty scheduler
+  was obtained, so it is shorter than the caller's wall clock.
 - **The emitted C is patched by regex.** The build asserts each patch
   matched exactly as expected and that no `sigaction`, `signal`, `_exit` or
   `abort` call survives; a Bend release that changes the runtime fails the

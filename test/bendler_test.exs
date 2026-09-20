@@ -1,9 +1,9 @@
 defmodule BendlerTest do
   use ExUnit.Case, async: false
 
-  alias Bendler.Examples.{FibNif, FibPort}
-  alias Bendler.Test.{BoomNif, SlowPort}
   alias Bendler.{Codec, Sig}
+  alias Bendler.Examples.{FibNif, FibPort}
+  alias Bendler.Test.{BoomNif, QueueNif, SlowPort}
 
   @fibs [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987]
 
@@ -84,7 +84,8 @@ defmodule BendlerTest do
       assert_raise ArgumentError, ~r/U32/, fn -> Codec.encode(-1, :u32) end
       assert_raise ArgumentError, ~r/U32/, fn -> Codec.encode(2 ** 32, :u32) end
       assert_raise ArgumentError, ~r/Nat/, fn -> Codec.encode(2 ** 48, :nat) end
-      assert_raise ArgumentError, fn -> apply(Codec, :encode, ["x", :bool]) end
+      not_a_bool = Enum.random(["x", "y"])
+      assert_raise ArgumentError, fn -> Codec.encode(not_a_bool, :bool) end
       assert_raise ArgumentError, fn -> Codec.encode([1, "a"], {:list, :u32}) end
     end
 
@@ -159,6 +160,18 @@ defmodule BendlerTest do
 
       assert 16_777_216 in outcomes
       assert :busy in outcomes
+    end
+
+    test "a request withdrawn before pick-up leaves no stale wake-up behind" do
+      # t1 is in flight; t2 posts to the mailbox, is never taken in time, and withdraws
+      t1 = Task.async(fn -> reason(fn -> QueueNif.slow(28) end) end)
+      Process.sleep(20)
+      t2 = Task.async(fn -> reason(fn -> QueueNif.slow(28) end) end)
+      assert Task.await(t1, 5_000) == :timeout
+      assert Task.await(t2, 5_000) == :timeout
+      # once the abandoned work finishes, the loop parks cleanly and serves again
+      assert eventually(fn -> reason(fn -> QueueNif.fib(10, 0, 1) end) == 55 end)
+      assert QueueNif.fib(20, 0, 1) == 6765
     end
 
     test "a deadline abandons the request; a runtime error freezes that runtime, not the VM" do

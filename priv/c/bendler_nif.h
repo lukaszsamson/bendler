@@ -12,7 +12,7 @@
 #include "bendler_common.h"
 
 static pthread_mutex_t bl_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  bl_cv   = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  bl_cv;        // on Linux, a CLOCK_MONOTONIC condvar (see bendler_start)
 static int   bl_pipe[2];
 
 typedef struct BlCall {
@@ -55,12 +55,15 @@ static void bl_deliver(u8* p, u64 n) {
 }
 
 static Term bl_frame_more(Env e, IoWork* w) {
+  // drain every wake-up byte first: a caller that posted and then withdrew
+  // its request on a deadline left one behind, and a readable pipe with
+  // nothing to take would otherwise wake the loop again at once
+  u8 byte; while (read(bl_pipe[0], &byte, 1) == 1) {}
   pthread_mutex_lock(&bl_lock);
   if (bl_next == NULL) {
     pthread_mutex_unlock(&bl_lock);
     return io_wait_on(w, bl_pipe[0], POLLIN, 0, bl_frame_more);
   }
-  u8 byte; while (read(bl_pipe[0], &byte, 1) == 1) {}
   bl_cur = bl_next; bl_next = NULL;
   bl_req = bl_cur->req; bl_end = bl_cur->req + bl_cur->req_len;
   pthread_cond_broadcast(&bl_cv);   // the slot is free for the next poster
@@ -93,6 +96,16 @@ void bendler_start(int threads, int max_waiting) {
   if (up) return;
   up = true;
   if (max_waiting > 0) bl_max_waiting = max_waiting;
+  // the deadline is monotonic; the condvar must wait on the same clock
+  // (macOS has no clock attribute and uses a relative wait instead)
+  pthread_condattr_t ca;
+  int rc = pthread_condattr_init(&ca);
+#ifndef __APPLE__
+  if (rc == 0) rc = pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+#endif
+  if (rc == 0) rc = pthread_cond_init(&bl_cv, &ca);
+  pthread_condattr_destroy(&ca);
+  if (rc != 0) { bl_dead = true; snprintf(bl_err, sizeof bl_err, "condvar init failed"); return; }
   if (pipe(bl_pipe)) { bl_dead = true; snprintf(bl_err, sizeof bl_err, "pipe failed"); return; }
   for (int i = 0; i < 2; i += 1) fcntl(bl_pipe[i], F_SETFL, fcntl(bl_pipe[i], F_GETFL) | O_NONBLOCK);
   pthread_t tid;

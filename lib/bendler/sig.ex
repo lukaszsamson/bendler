@@ -29,24 +29,25 @@ defmodule Bendler.Sig do
     |> String.split("\n")
     |> Enum.with_index(1)
     |> Enum.reduce({[], []}, fn {raw, no}, {ok, bad} ->
-      line = raw |> strip_comment() |> String.trim_trailing()
-
-      case Regex.run(@def_re, line) do
-        nil ->
-          case Regex.run(~r/^(?:@unsafe\s+)?def\s+([A-Za-z_][\w.]*)\(/, line) do
-            [_, name] -> {ok, [{name, "a signature bendler cannot read (multi-line?)"} | bad]}
-            nil -> {ok, bad}
-          end
-
-        [_, name, params, ret] ->
-          case build(name, params, ret, no) do
-            {:ok, sig} -> {[sig | ok], bad}
-            {:skip, why} -> {ok, [{name, why} | bad]}
-          end
+      case classify(raw |> strip_comment() |> String.trim_trailing(), no) do
+        :other -> {ok, bad}
+        {:ok, sig} -> {[sig | ok], bad}
+        {:skip, name, why} -> {ok, [{name, why} | bad]}
       end
     end)
     |> then(fn {ok, bad} -> {Enum.reverse(ok), Enum.reverse(bad)} end)
     |> check_collisions()
+  end
+
+  @def_head_re ~r/^(?:@unsafe\s+)?def\s+([A-Za-z_][\w.]*)\(/
+
+  # One line: a readable def signature, an unreadable def head, or neither.
+  defp classify(line, no) do
+    case {Regex.run(@def_re, line), Regex.run(@def_head_re, line)} do
+      {[_, name, params, ret], _} -> build(name, params, ret, no)
+      {nil, [_, name]} -> {:skip, name, "a signature bendler cannot read (multi-line?)"}
+      {nil, nil} -> :other
+    end
   end
 
   # `a.b` and `a_b` would both become a_b/1 in Elixir
@@ -68,14 +69,14 @@ defmodule Bendler.Sig do
   # a `#` outside a string starts a comment; strings in a signature are not expected
   defp strip_comment(line), do: line |> String.split("#", parts: 2) |> hd()
 
-  defp build("main", _, _, _), do: {:skip, "main is the program, not an export"}
+  defp build("main", _, _, _), do: {:skip, "main", "main is the program, not an export"}
 
   defp build(name, params, ret, no) do
     with {:ok, params} <- parse_params(params),
          {:ok, ret_t} <- parse_type(ret) do
       {:ok, %__MODULE__{name: name, params: params, ret: {ret_t, String.trim(ret)}, line: no}}
     else
-      {:error, why} -> {:skip, why}
+      {:error, why} -> {:skip, name, why}
     end
   end
 
@@ -85,30 +86,32 @@ defmodule Bendler.Sig do
     text
     |> split_top()
     |> Enum.reduce_while({:ok, []}, fn p, {:ok, acc} ->
-      case Regex.run(~r/^([+\-~]?)(\w+)\s*:\s*(.+)$/, String.trim(p)) do
-        [_, "-", n, _] ->
-          {:halt, {:error, "erased parameter #{n}"}}
-
-        [_, "~", n, _] ->
-          {:halt, {:error, "template parameter #{n}"}}
-
-        [_, q, n, t] ->
-          case parse_type(t) do
-            {:ok, type} ->
-              {:cont,
-               {:ok, [%{name: n, type: type, text: String.trim(t), reusable: q == "+"} | acc]}}
-
-            {:error, why} ->
-              {:halt, {:error, "parameter #{n}: #{why}"}}
-          end
-
-        nil ->
-          {:halt, {:error, "unreadable parameter #{inspect(p)}"}}
+      case parse_param(String.trim(p)) do
+        {:ok, param} -> {:cont, {:ok, [param | acc]}}
+        {:error, why} -> {:halt, {:error, why}}
       end
     end)
     |> case do
       {:ok, ps} -> {:ok, Enum.reverse(ps)}
       err -> err
+    end
+  end
+
+  @param_re ~r/^([+\-~]?)(\w+)\s*:\s*(.+)$/
+
+  defp parse_param(text) do
+    case Regex.run(@param_re, text) do
+      [_, "-", n, _] -> {:error, "erased parameter #{n}"}
+      [_, "~", n, _] -> {:error, "template parameter #{n}"}
+      [_, q, n, t] -> typed_param(n, q == "+", String.trim(t))
+      nil -> {:error, "unreadable parameter #{inspect(text)}"}
+    end
+  end
+
+  defp typed_param(name, reusable, text) do
+    case parse_type(text) do
+      {:ok, type} -> {:ok, %{name: name, type: type, text: text, reusable: reusable}}
+      {:error, why} -> {:error, "parameter #{name}: #{why}"}
     end
   end
 
@@ -127,36 +130,31 @@ defmodule Bendler.Sig do
     Enum.reverse([cur | parts])
   end
 
+  @word_types %{
+    "U32" => :u32,
+    "Nat" => :nat,
+    "String" => :string,
+    "Bool" => :bool,
+    "Unit" => :unit
+  }
+  @list_re ~r/^List<(?:&[012]\s*,\s*)?(.+)>$/
+
   @doc "The marshalled type a Bend type spells, if any."
   @spec parse_type(String.t()) :: {:ok, type} | {:error, String.t()}
   def parse_type(text) do
     case String.trim(text) do
-      "U32" ->
-        {:ok, :u32}
+      "+" <> rest -> parse_type(rest)
+      other -> word_or_list(Map.get(@word_types, other), other)
+    end
+  end
 
-      "Nat" ->
-        {:ok, :nat}
+  defp word_or_list(nil, text), do: list_type(text)
+  defp word_or_list(type, _text), do: {:ok, type}
 
-      "String" ->
-        {:ok, :string}
-
-      "Bool" ->
-        {:ok, :bool}
-
-      "Unit" ->
-        {:ok, :unit}
-
-      "+" <> rest ->
-        parse_type(rest)
-
-      other ->
-        case Regex.run(~r/^List<(?:&[012]\s*,\s*)?(.+)>$/, other) do
-          [_, inner] ->
-            with {:ok, t} <- parse_type(inner), do: {:ok, {:list, t}}
-
-          nil ->
-            {:error, "unsupported type #{other}"}
-        end
+  defp list_type(text) do
+    case Regex.run(@list_re, text) do
+      [_, inner] -> with {:ok, t} <- parse_type(inner), do: {:ok, {:list, t}}
+      nil -> {:error, "unsupported type #{text}"}
     end
   end
 

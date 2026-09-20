@@ -45,9 +45,12 @@ static int load(ErlNifEnv* env, void** priv, ERL_NIF_TERM info) {
   return 0;
 }
 
-// No upgrade and no unload: the runtime thread and its workers cannot be
-// stopped, so the library must stay loaded for the life of the VM. Without
-// an upgrade callback, a second load_nif of the same module is refused.
+// No upgrade callback, so a second load_nif of the same module is refused;
+// no unload callback because there is nothing it could do: the runtime
+// thread and its workers cannot be stopped. That is a limitation, not a
+// protection: purging the module's code after a load lets the library be
+// unloaded under threads still executing it. Pinning it with a resource
+// whose destructor covers every thread is the open item in docs/MVP.md.
 static ErlNifFunc funcs[] = {
   { "__bendler_call", 2, call_nif, ERL_NIF_DIRTY_JOB_CPU_BOUND },
 };

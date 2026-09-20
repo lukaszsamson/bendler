@@ -86,8 +86,10 @@ defmodule Bendler.Port do
   defp start_timer(:infinity, _from), do: nil
   defp start_timer(ms, from), do: Process.send_after(self(), {:deadline, from}, ms)
 
-  # Sends the request or fails it; answers a handle_info/handle_call-neutral
-  # {:noreply, state} or {:stop, reason, state}.
+  # Sends the request or fails it, then keeps draining the queue until a
+  # request is in flight, the queue is empty, or the port is gone. Every
+  # outcome is a handle_info/handle_call-neutral {:noreply, state} or
+  # {:stop, reason, state}, and never leaves queued requests unscheduled.
   defp dispatch(req, s) do
     case send_frame(s.port, req.frame) do
       :ok ->
@@ -95,11 +97,18 @@ defmodule Bendler.Port do
 
       :busy ->
         finish(req, {:error, :busy})
-        {:noreply, s}
+        drain(s)
 
       :closed ->
         finish(req, {:error, :exited})
         {:stop, {:shutdown, :port_closed}, s}
+    end
+  end
+
+  defp drain(%{inflight: nil} = s) do
+    case :queue.out(s.queue) do
+      {{:value, next}, q} -> dispatch(next, %{s | queue: q, queued: s.queued - 1})
+      {:empty, _} -> {:noreply, s}
     end
   end
 
@@ -118,12 +127,7 @@ defmodule Bendler.Port do
   @impl true
   def handle_info({port, {:data, reply}}, %{port: port, inflight: req} = s) when req != nil do
     finish(req, reply)
-    s = %{s | inflight: nil}
-
-    case :queue.out(s.queue) do
-      {{:value, next}, q} -> dispatch(next, %{s | queue: q, queued: s.queued - 1})
-      {:empty, _} -> {:noreply, s}
-    end
+    drain(%{s | inflight: nil})
   end
 
   def handle_info({:deadline, from}, %{inflight: %{from: from} = req} = s) do
