@@ -1,0 +1,94 @@
+# Validation record
+
+Observed 2026-09-20 on macOS arm64 (Apple M-series, 24 schedulers), Bend
+2.0.20 at `~/.bend/bin/bend` (checkout `7561656…`), Elixir 1.21.0-dev on
+OTP 28 (erts 16.4.0.1), Apple clang 21. A smoke test of compatibility and
+behaviour, not a benchmark or a safety certification.
+
+## Test suite
+
+`mix test`: **17 tests, 0 failures**, repeated runs with random seeds.
+Coverage:
+
+1. Signature parsing: exportable defs, skipped ones with reasons, trailing
+   comments, multi-line signatures reported, `a.b`/`a_b` collision refused.
+2. Codec round-trips for every type including nested lists; range checks;
+   a list count past the binary refused; error frames carry a message.
+3. NIF: generated functions with docs; every marshalled type; empty and
+   nested lists through the native codec; a parallel call; Elixir-side
+   argument checks; 16 callers at concurrency 4 all served, 32 callers of a
+   slow def get a mix of results and `:busy`; a 150 ms deadline abandons a
+   slow request, the runtime finishes it and later calls work; a `Nat`
+   overflow freezes that module's runtime (`:dead`) while another NIF
+   module keeps working.
+4. Port: every type, nested lists, concurrent callers; with `max_queue: 1`
+   and a 150 ms deadline: one in flight, one queued, the third `:busy`, the
+   deadline stops the owner with `{:shutdown, :timeout}`, the queued caller
+   gets `:exited`, the supervisor's replacement serves the next call; a
+   well-framed but invalid request (wrong type, trailing bytes, unknown
+   index) is answered with an error frame and the worker serves the next
+   call; queued callers get `:exited` when the port dies.
+5. The NIF refuses an invalid request on the calling thread with the
+   reason text, before anything reaches the runtime.
+
+## Build workflows
+
+- `MIX_ENV=test mix bendler.clean` then `mix compile` rebuilt all four
+  artifacts (the review's R1: previously it built none).
+- A separate Mix application (`scratch/consumer`) with `{:bendler, path:
+  "../.."}` and the `:bendler` compiler built exactly one artifact, its own
+  `consumer_calc`, and `Consumer.Calc.add(20, 22)` returned 42 through the
+  port. The dependency's own `priv/bendler/` still shows this repository's
+  test artifacts because Mix symlinks a project's `priv/` into every
+  environment's build; nothing from it is built by the consumer.
+
+The line `bendler: stdout write failed` on stderr during the suite is the
+port worker exiting after its owner closed the port on a deadline; `bend: a
+Nat past the largest immediate 2^48-1` is the overflow test.
+
+## Sanitizer
+
+The port program was rebuilt from the test build directory with
+`-fsanitize=address` and driven from Elixir with `nest([])`,
+`nest([[], [1], []])`, `words("")`, `range(0, [])` and a frame whose list
+count (100000) exceeds its bytes. All four calls answered correctly with
+no sanitizer report; the lying count exited 65. This exercises the fix for
+the empty-list type scanner that an independent review reproduced with ASan on the
+previous version.
+
+## Concurrency trace
+
+Instrumenting the NIF transport (stderr prints on post, take, reply, done)
+with 4 concurrent callers showed reply 6 overwritten by reply 7 before
+caller 6 reacquired the mutex. After giving each call its own slot, five
+rounds of 16 calls at concurrency 4 completed; the instrumentation was
+removed.
+
+## Release
+
+`MIX_ENV=prod mix release` built `_build/prod/rel/bendler`. Running its
+`eval` with `PATH=/usr/bin:/bin` (no `bend`) called
+`Bendler.Examples.FibNif.fib(30, 0, 1)` → 832040 and, after
+`FibPort.start_link/0`, `FibPort.words("a b")` → `["a", "b"]`. The build
+is not invoked at runtime. Note that the release's `priv/bendler/` also
+contained the test-only modules' artifacts, because Mix shares the
+project's `priv/` across environments.
+
+## Measurements
+
+From `mix run scratch/bench.exs` (2000 warm calls averaged; one timed
+`pow2(24)`), before the admission and deadline changes:
+
+| call | NIF | port |
+|---|---|---|
+| `is_big(5)` | 10.3 µs | 9.7 µs |
+| `fib(90, 0, 1)` | 14.6 µs | 12.1 µs |
+| `range(1000, [])` | 69 µs | 65 µs |
+| `pow2(24)` | 9 ms | 8 ms |
+
+## Not validated
+
+Linux; GPU programs; hostile worker output beyond the frame cap; memory
+growth under sustained load; unload or upgrade of a NIF module (unsupported
+by design); hard cancellation; more than one request in flight; concurrent
+builds; per-environment artifacts.

@@ -1,0 +1,8 @@
+/_build/
+/deps/
+/doc/
+/priv/bendler/
+/scratch/
+/.elixir_ls/
+erl_crash.dump
+*.ez
