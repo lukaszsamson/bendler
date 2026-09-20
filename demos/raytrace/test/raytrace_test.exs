@@ -175,4 +175,29 @@ defmodule Bendler.Demos.RaytraceTest do
     stride = w * 3
     assert for(<<0, row::binary-size(^stride) <- lines>>, into: <<>>, do: row) == rgb
   end
+
+  # The GPU lane: only where a GPU is at hand (macOS with Metal). With
+  # `gpu: :on` the `!` calls run on the device and must agree with the CPU.
+  @gpu match?({:unix, :darwin}, :os.type())
+
+  if @gpu do
+    test "the GPU lane renders the upstream scene bit-exactly and a tile the same as the CPU" do
+      start_supervised!({RaytracePort, threads: 4, gpu: :on, timeout: 60_000})
+      assert RaytracePort.upstream_checksum_gpu(6, 80) == 402_971
+      assert RaytracePort.upstream_checksum_gpu(3, 40) == 19_281
+      scene = RaytracePort.default_scene()
+      [gpu] = RaytracePort.render_tiles_gpu(scene, 640, 480, [{64, 64, 64, 64}])
+      [cpu] = RaytracePort.render_tiles(scene, 640, 480, [{64, 64, 64, 64}])
+      assert gpu == cpu
+    end
+  end
+
+  test "the GPU defs run on the CPU pool when the port has no GPU" do
+    start_supervised!({RaytracePort, threads: 2})
+    assert RaytracePort.upstream_checksum_gpu(6, 80) == 402_971
+    scene = RaytracePort.default_scene()
+    {_, _, a} = RaytracePort.render(scene, 96, 72, lane: :gpu)
+    {_, _, b} = RaytracePort.render(scene, 96, 72)
+    assert a == b
+  end
 end

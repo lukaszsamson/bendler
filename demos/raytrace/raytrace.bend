@@ -342,6 +342,15 @@ def upstream_checksum(+rows: U32, +width: U32) -> U32:
   hm = U32.sub(U32.shln(1, rr), 1)
   up.rowf(rr, 0, hm, width, hw, hh)
 
+# the same on the GPU (`!` ships the call and every fork under it to the
+# device; with `--gpu off` it runs on the CPU pool)
+def upstream_checksum_gpu(+rows: U32, +width: U32) -> U32:
+  +rr = U32.to_nat(rows)
+  hw = U32.to_f32(U32.div(width, 2))
+  hh = U32.to_f32(U32.div(U32.shln(1, rr), 2))
+  hm = U32.sub(U32.shln(1, rr), 1)
+  up.rowf!(rr, 0, hm, width, hw, hh)
+
 # The scene from Elixir
 # =====================
 
@@ -554,19 +563,19 @@ def pixel(+fs: List<&2, Sph8>,
   quant(vadd(vadd(l1, l2), vadd(l3, l4)), tail)
 
 # one row of the tile, left to right; `n` counts the pixels left
+# one row, right to left, each pixel pushed onto the words so far: a tail
+# loop, so a row costs no frame per pixel (a flat loop on the GPU)
 def row_go(n: Nat, +fs: List<&2, Sph8>,
            +lpx: F32, +lpy: F32, +lpz: F32,
            +skyr: F32, +skyg: F32, +skyb: F32,
            +ox: F32, +oy: F32, +oz: F32,
-           +x0: U32, +y: U32, +tw: U32, +hw: F32, +hh: F32) -> List<&2, U32>:
+           +x0: U32, +y: U32, +hw: F32, +hh: F32, acc: List<&2, U32>) -> List<&2, U32>:
   match n:
     case 0n:
-      Nil{}
+      acc
     case 1n++p:
-      +i = U32.sub(U32.sub(tw, 1), U32.from_nat(p))
-      pixel(fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz,
-        U32.add(x0, i), y, hw, hh,
-        row_go(p, fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, tw, hw, hh))
+      row_go(p, fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, hw, hh,
+        pixel(fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, U32.add(x0, U32.from_nat(p)), y, hw, hh, acc))
 
 def row_or_nil(ok: Bool, +fs: List<&2, Sph8>,
                +lpx: F32, +lpy: F32, +lpz: F32,
@@ -577,21 +586,36 @@ def row_or_nil(ok: Bool, +fs: List<&2, Sph8>,
     case False{}:
       Nil{}
     case True{}:
-      row_go(U32.to_nat(tw), fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, tw, hw, hh)
+      row_go(U32.to_nat(tw), fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, hw, hh, Nil{})
 
-# the rows of a tile as a balanced fork tree: 2^d leaves, the ones past
-# the tile's last row contributing nothing
+# The rows of a tile as a balanced fork tree: 2^d leaves, the ones past
+# the tile's last row contributing nothing. The tree is kept as a tree
+# (a leaf per row) rather than appended into one list: List.append is
+# not tail recursive, and on the GPU a frame per pixel word overflows the
+# device stack; the tree is flattened once, straight into the buffer.
+type Rows is Data:
+  RLeaf{px: List<&2, U32>}
+  RFork{a: Rows, b: Rows}
+
 def rows_fork(d: Nat, +fs: List<&2, Sph8>,
               +lpx: F32, +lpy: F32, +lpz: F32,
               +skyr: F32, +skyg: F32, +skyb: F32,
               +ox: F32, +oy: F32, +oz: F32,
-              +x0: U32, +y: U32, +ylim: U32, +tw: U32, +hw: F32, +hh: F32) -> List<&2, U32>:
+              +x0: U32, +y: U32, +ylim: U32, +tw: U32, +hw: F32, +hh: F32) -> Rows:
   match d:
     case 0n:
-      row_or_nil(U32.is_lt(y, ylim), fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, tw, hw, hh)
+      RLeaf{row_or_nil(U32.is_lt(y, ylim), fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, tw, hw, hh)}
     case 1n++p:
       a b = rows_fork(p, fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, y, ylim, tw, hw, hh) rows_fork(p, fs, lpx, lpy, lpz, skyr, skyg, skyb, ox, oy, oz, x0, U32.add(y, U32.shln(1, p)), ylim, tw, hw, hh)
-      List.append(&2, U32, a, b)
+      RFork{a, b}
+
+# the rows' words into the buffer, leaf by leaf (the tree is log2(rows) deep)
+def pack_rows(t: Rows, st: Array<U32> & U32) -> Array<U32> & U32:
+  match t:
+    case RLeaf{px}:
+      pack.go(px, st)
+    case RFork{a, b}:
+      pack_rows(b, pack_rows(a, st))
 
 def tile_go(sps: List<&2, Sphere>, +lpx: F32, +lpy: F32, +lpz: F32,
             +skyr: F32, +skyg: F32, +skyb: F32,
@@ -599,8 +623,10 @@ def tile_go(sps: List<&2, Sphere>, +lpx: F32, +lpy: F32, +lpz: F32,
             +w: U32, +h: U32, +x0: U32, +y0: U32, +tw: U32, +th: U32) -> B.Bytes:
   hw = F32.div(U32.to_f32(w), U32.to_f32(2))
   hh = F32.div(U32.to_f32(h), U32.to_f32(2))
-  pack(U32.mul(U32.mul(tw, th), 3), rows_fork(B.Bytes.depth(th), flatten(sps), lpx, lpy, lpz,
-    skyr, skyg, skyb, ox, oy, oz, x0, y0, U32.add(y0, th), tw, hw, hh))
+  +len = U32.mul(U32.mul(tw, th), 3)
+  pack.fin(pack_rows(rows_fork(B.Bytes.depth(th), flatten(sps), lpx, lpy, lpz,
+    skyr, skyg, skyb, ox, oy, oz, x0, y0, U32.add(y0, th), tw, hw, hh),
+    (Array.new(U32, B.Bytes.depth(len), 0), 0)), len)
 
 def tile_sky(sky: Vec, sps: List<&2, Sphere>, +lpx: F32, +lpy: F32, +lpz: F32,
              +ox: F32, +oy: F32, +oz: F32,
@@ -638,11 +664,49 @@ def render_tiles.go(tiles: List<(U32 & U32 & U32 & U32)>, +scene: Scene, +w: U32
       a b = render_tile(scene, w, h, x0, y0, tw, th) render_tiles.go(rest, scene, w, h)
       a <> b
 
-# every tile of `tiles` (x0, y0, tw, th), rendered in parallel
+# The tiles forked as a balanced tree over the list (halves by count):
+# the device dies on a right spine of forks about a thousand deep
+# (bendlang/bend#918), and the CPU pool prefers the balance too. A tile
+# is a Data record here so the list can be shared by the two halves.
+type Rect is Data:
+  Rect{x0: U32, y0: U32, tw: U32, th: U32}
+
+def to_rects(ts: List<(U32 & U32 & U32 & U32)>) -> List<&2, Rect>:
+  match ts:
+    case Nil{}:
+      Nil{}
+    case t <> rest:
+      (x0, y0, tw, th) = t
+      Rect{x0, y0, tw, th} <> to_rects(rest)
+
+def rect_of(t: Rect, +scene: Scene, +w: U32, +h: U32) -> B.Bytes:
+  match t:
+    case Rect{x0, y0, tw, th}:
+      render_tile(scene, w, h, x0, y0, tw, th)
+
+def tiles_fork(n: Nat, +xs: List<&2, Rect>, +scene: Scene, +w: U32, +h: U32) -> List<B.Bytes>:
+  match n:
+    case 0n:
+      Nil{}
+    case 1n++p:
+      match xs:
+        case Nil{}:
+          Nil{}
+        case t <> rest:
+          match rest:
+            case Nil{}:
+              [rect_of(t, scene, w, h)]
+            case _:
+              +half = Nat.div(List.length(&2, Rect, xs), 2n)
+              a b = tiles_fork(p, List.take(&2, Rect, xs, half), scene, w, h) tiles_fork(p, List.drop(&2, Rect, xs, half), scene, w, h)
+              List.append(&1, B.Bytes, a, b)
+
+# every tile of `tiles` (x0, y0, tw, th), rendered in parallel as a
+# balanced fork tree (twice as fast as a spine on the CPU pool too)
 def render_tiles(
   +scene: Scene, +w: U32, +h: U32, tiles: List<(U32 & U32 & U32 & U32)>
 ) -> List<B.Bytes>:
-  render_tiles.go(tiles, scene, w, h)
+  tiles_fork(64n, to_rects(tiles), scene, w, h)
 
 def render_checked.go(ok: Bool, scene: Scene, +w: U32, +h: U32, +x0: U32, +y0: U32,
                       +tw: U32, +th: U32) -> Result<String, B.Bytes>:
@@ -661,3 +725,10 @@ def render_checked(
     Bool.and(Bool.and(Bool.not(U32.is_zero(tw)), Bool.not(U32.is_zero(th))),
       Bool.and(U32.is_le(U32.add(x0, tw), w), U32.is_le(U32.add(y0, th), h))),
     scene, w, h, x0, y0, tw, th)
+
+# every tile of `tiles`, rendered on the GPU: one bang over the tile
+# list, whose forks (tiles as a balanced tree, then rows) fill the lanes
+def render_tiles_gpu(
+  +scene: Scene, +w: U32, +h: U32, tiles: List<(U32 & U32 & U32 & U32)>
+) -> List<B.Bytes>:
+  tiles_fork!(64n, to_rects(tiles), scene, w, h)

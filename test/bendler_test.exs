@@ -21,6 +21,17 @@ defmodule BendlerTest do
     e in Bendler.Error -> e.reason
   end
 
+  test "the gpu option is checked" do
+    base = [otp_app: :bendler, source: "bend/fib.bend"]
+    assert Bendler.config!(X, base ++ [gpu: :on]).gpu == :on
+    assert Bendler.config!(X, base ++ [gpu: "4GB"]).gpu == "4GB"
+    assert Bendler.config!(X, base).gpu == :off
+
+    for bad <- [[gpu: true], [gpu: "4 gigs"], [backend: :nif, gpu: :on]] do
+      assert_raise ArgumentError, ~r/gpu/, fn -> Bendler.config!(X, base ++ bad) end
+    end
+  end
+
   test "an export that cannot cross names the reason" do
     path = Path.join(System.tmp_dir!(), "bendler_skip_#{System.unique_integer([:positive])}.bend")
     File.write!(path, "import Base\n\ndef bad(-x: U32) -> U32:\n  0\n\ndef main() -> U32:\n  0\n")
