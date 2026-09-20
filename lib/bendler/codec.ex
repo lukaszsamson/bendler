@@ -9,12 +9,25 @@ defmodule Bendler.Codec do
       6 List (count32, then the items)  7 Bytes (len32, raw bytes)
       8 Tuple (arity8, then fields)    9 None    10 Some (value)
       11 Done (value)                  12 Fail (error)
+      13 F32 (4 bytes, IEEE bits)      14 Char (4 bytes, a code point)
 
   A Result's Fail is returned as `{:error, value}`; only tag 0 raises a
   transport error. Composite values may nest up to 32 levels.
+
+  An `F32` takes an Elixir float, rounded to the nearest single; a float
+  past the single range raises `ArgumentError`. The atoms `:nan`,
+  `:infinity` and `:neg_infinity` cross both ways, since the BEAM has no
+  such floats. A `Char` is a code point, 0..0x10FFFF without surrogates.
+  A `Map<V>` is an Elixir map with binary keys; on the wire it is a list of
+  `String & V` pairs.
   """
 
   @nat_max Integer.pow(2, 48) - 1
+  # doubles below this round to a finite single; the midpoint to the next one
+  @f32_edge 3.402_823_567_797_336_6e38
+  @f32_nan <<0x7FC00000::32>>
+  @f32_inf <<0x7F800000::32>>
+  @f32_neg_inf <<0xFF800000::32>>
 
   @type type :: Bendler.Sig.type()
 
@@ -33,6 +46,16 @@ defmodule Bendler.Codec do
   def encode(false, :bool), do: <<4, 0>>
   def encode(:unit, :unit), do: <<5>>
   def encode(v, :bytes) when is_binary(v), do: <<7, byte_size(v)::32, v::binary>>
+  def encode(v, :f32) when is_float(v) and abs(v) < @f32_edge, do: <<13, v::float-32>>
+  def encode(:nan, :f32), do: <<13>> <> @f32_nan
+  def encode(:infinity, :f32), do: <<13>> <> @f32_inf
+  def encode(:neg_infinity, :f32), do: <<13>> <> @f32_neg_inf
+
+  def encode(v, :char) when is_integer(v) and v in 0..0x10FFFF and v not in 0xD800..0xDFFF,
+    do: <<14, v::32>>
+
+  def encode(v, {:map, t}) when is_map(v),
+    do: encode(Map.to_list(v), {:list, {:tuple, [:string, t]}})
 
   def encode(v, {:list, t}) when is_list(v),
     do: <<6, length(v)::32>> <> Enum.map_join(v, &encode(&1, t))
@@ -75,8 +98,13 @@ defmodule Bendler.Codec do
     end
   end
 
-  @doc "Asserts a decoded reply has the export's declared type; the wire tag alone is not trusted."
+  @doc """
+  Asserts a decoded reply has the export's declared type; the wire tag alone
+  is not trusted. A Map arrives as its pair list and becomes a map here.
+  """
   @spec check(term, type, atom) :: term
+  def check(v, {:map, t}, fun), do: Map.new(check(v, {:list, {:tuple, [:string, t]}}, fun))
+
   def check(v, t, fun) do
     if typed?(v, t),
       do: v,
@@ -89,6 +117,8 @@ defmodule Bendler.Codec do
   defp typed?(v, :bool), do: is_boolean(v)
   defp typed?(v, :unit), do: v == :unit
   defp typed?(v, :bytes), do: is_binary(v)
+  defp typed?(v, :f32), do: is_float(v) or v in [:nan, :infinity, :neg_infinity]
+  defp typed?(v, :char), do: is_integer(v) and v in 0..0x10FFFF and v not in 0xD800..0xDFFF
   defp typed?(v, {:list, t}), do: is_list(v) and Enum.all?(v, &typed?(&1, t))
 
   defp typed?(v, {:tuple, ts}) when is_tuple(v) and tuple_size(v) == length(ts),
@@ -111,6 +141,9 @@ defmodule Bendler.Codec do
   defp decode_value(<<4, b, r::binary>>, _) when b in [0, 1], do: {b == 1, r}
   defp decode_value(<<5, r::binary>>, _), do: {:unit, r}
   defp decode_value(<<7, n::32, s::binary-size(n), r::binary>>, _), do: {s, r}
+  defp decode_value(<<13, f::float-32, r::binary>>, _), do: {f, r}
+  defp decode_value(<<13, bits::32, r::binary>>, _), do: {non_finite(bits), r}
+  defp decode_value(<<14, v::32, r::binary>>, _), do: {v, r}
 
   defp decode_value(<<8, n, r::binary>>, d) when n in 2..16 and n <= byte_size(r) do
     {xs, rest} = decode_items(n, r, d)
@@ -132,6 +165,11 @@ defmodule Bendler.Codec do
 
   defp decode_value(other, _), do: raise(Bendler.Error, "malformed reply: #{inspect(other)}")
 
+  # a float-32 match only fails on a NaN or an infinity
+  defp non_finite(bits) when Bitwise.band(bits, 0x7FFFFF) != 0, do: :nan
+  defp non_finite(bits) when Bitwise.band(bits, 0x80000000) == 0, do: :infinity
+  defp non_finite(_), do: :neg_infinity
+
   defp decode_items(n, r, d),
     do: Enum.map_reduce(List.duplicate(nil, n), r, fn _, r -> decode_value(r, d + 1) end)
 
@@ -141,6 +179,12 @@ defmodule Bendler.Codec do
   defp describe(:bool), do: "Bool"
   defp describe(:unit), do: "Unit (the atom :unit)"
   defp describe(:bytes), do: "Bytes (a binary)"
+
+  defp describe(:f32),
+    do: "F32 (a float within the single range, :nan, :infinity or :neg_infinity)"
+
+  defp describe(:char), do: "Char (a code point, 0..0x10FFFF without surrogates)"
+  defp describe({:map, t}), do: "Map of String to #{describe(t)} (a map with binary keys)"
   defp describe({:list, t}), do: "List of #{describe(t)}"
   defp describe({:tuple, ts}), do: "tuple of (#{Enum.map_join(ts, ", ", &describe/1)})"
   defp describe({:maybe, t}), do: "Maybe<#{describe(t)}>"

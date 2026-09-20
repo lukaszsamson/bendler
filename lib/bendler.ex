@@ -14,8 +14,11 @@ defmodule Bendler do
 
   Every exportable def of the Bend file (see `Bendler.Sig`) becomes a
   function of the module, with the same name and arity. Values cross by the
-  `Bendler.Codec`: `U32` and `Nat` are integers, `String` a binary, `Bool` a
-  boolean, `Unit` the atom `:unit`, `List<T>` a list.
+  `Bendler.Codec`: `U32`, `Nat` and `Char` are integers, `F32` a float (or
+  `:nan`, `:infinity`, `:neg_infinity`), `String` a binary, `Bool` a
+  boolean, `Unit` the atom `:unit`, `List<T>` a list, `A & B` a tuple,
+  `Maybe<T>` and `Result<E, T>` tagged tuples, `Map<V>` a map with binary
+  keys.
 
   ## Options
 
@@ -196,6 +199,7 @@ defmodule Bendler do
   def unwrap(other), do: other
 
   @doc false
+  @spec result(binary | {:error, term}, atom) :: term
   def result({:error, {:invalid, why}}, fun) do
     raise Bendler.Error, message: "#{fun}: the request was refused: #{why}", reason: :refused
   end

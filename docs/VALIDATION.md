@@ -152,3 +152,22 @@ therefore not claimed UBSan-clean. No workaround patches were applied to it.
 Five-sample CPU benchmark results and limitations are in
 `demos/csv/README.md`. NimbleCSV won every measured case. No Linux, streaming,
 GPU or arbitrary-user-datatype claim is made by this demo.
+
+## F32, Char and Map (2026-09-20)
+
+Full suite: **70 tests passed**; warnings-as-errors, format, credo
+(strict), dialyzer and `mix docs --warnings-as-errors` clean.
+
+| check | port | NIF |
+|---|---|---|
+| `half(3.0)`, `half(0.1)` rounds to single, `-1.0e-45` underflows to `-0.0` | yes | yes |
+| `1.0/0.0`, `-1.0/0.0`, `0.0/0.0` come back as `:infinity`, `:neg_infinity`, `:nan`; the atoms go in too | yes | yes |
+| `upper(?a)`, an astral code point, `String.to_list` as a charlist, a charlist back to a String | yes | yes |
+| `tally` builds a `Map<&2, U32>` in Bend; `total` consumes one; `scale` round-trips `Map<F32>`; `Map<List<B.Bytes>>` with an empty key | yes | yes |
+| 4096 keys through the trie | yes | yes |
+| native validator refuses a surrogate or out-of-range Char and a short F32 before dispatch; the worker keeps serving | yes | yes |
+
+Codec unit tests: a double past the single range, an integer or a string
+as `F32` raise; negative, surrogate and past-range Chars raise; a reply
+Char is range-checked on the host; a map with atom keys or a pair list in
+place of a map raise; the pair list becomes a map in `check/3`.

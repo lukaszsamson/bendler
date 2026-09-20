@@ -267,7 +267,8 @@ defmodule BendlerTest do
                FibNif.__bendler_call(<<1::32, 6, 1000::32, 1, 0::32>>, -1)
 
       assert_raise Bendler.Error, ~r/refused/, fn ->
-        Bendler.result({:error, {:invalid, ~c"x"}}, :f)
+        # Enum.at hides the shape from the type checker, which sees only the binary clause
+        Bendler.result(Enum.at([{:error, {:invalid, ~c"x"}}], 0), :f)
       end
     end
 

@@ -78,7 +78,7 @@ defmodule Bendler.Demos.CsvTest do
   end
 
   test "wrapper validates options and input budget" do
-    assert_raise ArgumentError, fn -> CsvPort.parse_string(:bad) end
+    assert_raise ArgumentError, fn -> CsvPort.parse_string(Enum.at([:bad], 0)) end
     assert_raise ArgumentError, fn -> CsvPort.parse_string(:binary.copy("x", 1_048_577)) end
     assert_raise ArgumentError, fn -> CsvPort.parse_string("x", separator: "||") end
     assert_raise ArgumentError, fn -> CsvPort.parse_string("x", skip_headers: :yes) end

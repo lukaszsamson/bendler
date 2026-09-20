@@ -70,9 +70,9 @@ Bytes prelude. Arbitrary user constructors still need generated converters.
 | [x] bytes (done) | `B.Bytes{len, buf: Array<U32>}` from the prelude | binary | one buffer block each way; Murmur3 on 64 KB went from 8.5 ms to 0.28 ms, ThumbHash 100x100 from 10.8 ms to 5.8 ms |
 | [x] tuples | `A & B`, `A & B & C` | `{a, b}`, `{a, b, c}` | 2–16 fields; parentheses preserve nesting; canonical Base Tuple nodes |
 | [x] `Maybe`, `Result` | `Maybe<T>`, `Result<E, T>` | `{:some, v} \| :none`, `{:ok, v} \| {:error, e}` | recursively composable; errors are arbitrary supported values; tested on both backends; see TYPES.md |
-| [ ] `F32` | `F32` | float | explicit conversion, range and non-finite policies; then ThumbHash |
-| [ ] `Char` | `Char` | integer code point | packed `CID_CHR` |
-| [ ] `Map` (string keys) | `Map<V>` | map with binary keys | Base has `new set get has del keys` |
+| [x] `F32` | `F32` | float | doubles round to the nearest single, past the single range raises; `:nan`, `:infinity`, `:neg_infinity` cross both ways; the term is the bare IEEE word |
+| [x] `Char` | `Char` | integer code point | a bare word at runtime (`Chr` is a newtype), so the same 4 bytes as `U32` under tag 14; the code-point range is validated on both sides |
+| [x] `Map` (string keys) | `Map<V>`, `Map<&2, V>` | map with binary keys | crosses as `List<Sigma<&2, &k, String, _ => V>>`; the shim wraps the call in `Map.from_list`/`Map.to_list`, so C never sees the trie. Whole parameter or result only |
 | [ ] user datatypes | `type T is Data` | tagged tuple or struct | generated Bend-side converters to and from a generic tree; never lay out user constructors in C |
 | [ ] `Nat` past 2^48 | error | raise | nothing to do until the runtime grows bignats |
 

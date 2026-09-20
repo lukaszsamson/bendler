@@ -6,7 +6,10 @@
 #include "bendler_specs.h"
 
 enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7,
-       BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12 };
+       BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12, BL_F32 = 13, BL_CHR = 14 };
+
+// A Char is a code point: below 0x110000 and not a surrogate.
+static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF); }
 
 #ifndef BENDLER_MAX_FRAME
 #define BENDLER_MAX_FRAME (64u << 20)   // a request or reply body past this is refused
@@ -73,7 +76,7 @@ static const char* bl_skip_at(const char* ty, int depth) {
   char k = *ty;
   if (k == 0) bl_fail("truncated type spec");
   ty += 1;
-  if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y') return ty;
+  if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y' || k == 'f' || k == 'c') return ty;
   int n = k == 'L' || k == 'M' ? 1 : k == 'R' ? 2 : k == 'T' ? bl_tuple_arity(&ty) : 0;
   if (n == 0) bl_fail("bad type spec");
   for (int i = 0; i < n; i += 1) ty = bl_skip_at(ty, depth + 1);
@@ -118,6 +121,10 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       *ty = end; return;
     }
     case 'u': if (tag != BL_U32 || c->end - c->p < 4) { c->err = "expected a U32"; return; } c->p += 4; return;
+    case 'f': if (tag != BL_F32 || c->end - c->p < 4) { c->err = "expected an F32"; return; } c->p += 4; return;
+    case 'c':
+      if (tag != BL_CHR || c->end - c->p < 4 || !bl_is_char(bl_rd32(c->p))) { c->err = "expected a Char"; return; }
+      c->p += 4; return;
     case 'n':
       if (tag != BL_NAT || c->end - c->p < 8) { c->err = "expected a Nat"; return; }
       if (bl_rd64(c->p) > NAT_IMM) { c->err = "a Nat past 2^48-1"; return; }
@@ -230,7 +237,7 @@ static Term bl_decode(Env e, const char** ty, int depth) {
       t = io_box(e, tag == BL_OK ? CID_DONE : CID_FAIL, bl_decode(e, ty, depth + 1));
       *ty = end; break;
     }
-    case 'u': t = (Term)bl_rd32(bl_req); bl_req += 4; break;
+    case 'u': case 'f': case 'c': t = (Term)bl_rd32(bl_req); bl_req += 4; break; // F32 bits and Char are bare words
     case 'n': t = (Term)bl_rd64(bl_req); bl_req += 8; break;
     case 's': { u32 n = bl_rd32(bl_req); bl_req += 4; t = io_str(e, (const char*)bl_req, n); bl_req += n; break; }
     case 'b': t = term_pak(*bl_req++ ? CID_TRUE : CID_FALSE, 0); break;
@@ -295,6 +302,8 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
       *ty = end; break;
     }
     case 'u': bl_put8(b, BL_U32); bl_put32(b, (u32)x); break;
+    case 'f': bl_put8(b, BL_F32); bl_put32(b, (u32)x); break;
+    case 'c': bl_put8(b, BL_CHR); bl_put32(b, (u32)x); break; // the host checks the range
     case 'n': bl_put8(b, BL_NAT); bl_put64(b, (u64)x); break;
     case 'b': bl_put8(b, BL_BOOL); bl_put8(b, term_aux(x) == CID_TRUE); break;
     case 't': bl_put8(b, BL_UNIT); break;

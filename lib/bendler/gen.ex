@@ -64,19 +64,39 @@ defmodule Bendler.Gen do
     binds =
       Enum.map_join(params, "\n", fn p ->
         q = if p.reusable, do: "+", else: ""
-        t = shim_type(p.text)
+        t = wire_type(p.type, p.text)
 
         "        #{q}#{p.name} : #{t} <- Bendler.arg(#{t}, #{inspect(Sig.spec(p.type))})"
       end)
 
-    args = Enum.map_join(params, ", ", & &1.name)
+    args = Enum.map_join(params, ", ", &from_wire(&1.type, &1.text, &1.name))
+    call = to_wire(ret_t, ret_text, "M.#{name}(#{args})")
 
     """
         case #{i}:
           do IO<Unit>:
     #{binds}
-            Bendler.reply(#{shim_type(ret_text)}, #{inspect(Sig.spec(ret_t))}, M.#{name}(#{args}))\
+            Bendler.reply(#{wire_type(ret_t, ret_text)}, #{inspect(Sig.spec(ret_t))}, #{call})\
     """
+  end
+
+  # A Map crosses as Base's pair list of the same kind; everything else as written.
+  defp wire_type({:map, _}, text) do
+    {k, v} = Sig.map_parts(text)
+    "List<&#{k}, Sigma<&2, &#{k}, String, _ => #{shim_type(v)}>>"
+  end
+
+  defp wire_type(_, text), do: shim_type(text)
+
+  defp from_wire({:map, _}, text, expr), do: map_conv("from_list", text, expr)
+  defp from_wire(_, _, expr), do: expr
+
+  defp to_wire({:map, _}, text, expr), do: map_conv("to_list", text, expr)
+  defp to_wire(_, _, expr), do: expr
+
+  defp map_conv(fun, text, expr) do
+    {k, v} = Sig.map_parts(text)
+    "Map.#{fun}(&#{k}, #{shim_type(v)}, #{expr})"
   end
 
   # the user's alias for the prelude's Bytes becomes the shim's
@@ -95,6 +115,7 @@ defmodule Bendler.Gen do
   defp has_bytes?({:list, t}), do: has_bytes?(t)
   defp has_bytes?({:tuple, ts}), do: Enum.any?(ts, &has_bytes?/1)
   defp has_bytes?({:maybe, t}), do: has_bytes?(t)
+  defp has_bytes?({:map, t}), do: has_bytes?(t)
   defp has_bytes?({:result, e, t}), do: has_bytes?(e) or has_bytes?(t)
   defp has_bytes?(_), do: false
 

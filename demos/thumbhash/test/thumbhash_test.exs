@@ -2,7 +2,6 @@ defmodule Bendler.Demos.ThumbhashTest do
   use ExUnit.Case, async: false
 
   alias Bendler.Demos.{ThumbhashPort, ThumbhashReference}
-  require Bitwise
 
   setup_all do
     start_supervised!({ThumbhashPort, []})

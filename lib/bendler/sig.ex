@@ -4,11 +4,14 @@ defmodule Bendler.Sig do
   of them can be exported to Elixir.
 
   A def is exportable when every parameter and its result are of a marshalled
-  type: `U32`, `Nat`, `String`, `Bool`, `Unit`, `Bytes` (the prelude's
-  `B.Bytes`, an Elixir binary), and recursively `List<T>`, products `A & B`,
-  `Maybe<T>` and `Result<E, T>`. Products have 2–16 fields; nesting is capped
-  at 32. Kind-qualified generics and reusable (`+`) types are accepted.
-  Erased (`-`) and template (`~`) parameters,
+  type: `U32`, `Nat`, `F32`, `Char`, `String`, `Bool`, `Unit`, `Bytes` (the
+  prelude's `B.Bytes`, an Elixir binary), and recursively `List<T>`, products
+  `A & B`, `Maybe<T>` and `Result<E, T>`. A whole parameter or result may
+  also be `Map<V>` (string keys), which crosses as a list of pairs and is
+  converted by Base's `Map.from_list` and `Map.to_list` on the Bend side;
+  a Map nested inside another type is not supported. Products have 2–16
+  fields; nesting is capped at 32. Kind-qualified generics and reusable
+  (`+`) types are accepted. Erased (`-`) and template (`~`) parameters,
   `IO` results and every other type keep a def out.
   """
 
@@ -21,6 +24,9 @@ defmodule Bendler.Sig do
           | :bool
           | :unit
           | :bytes
+          | :f32
+          | :char
+          | {:map, type}
           | {:list, type}
           | {:tuple, [type]}
           | {:maybe, type}
@@ -148,7 +154,9 @@ defmodule Bendler.Sig do
     "Nat" => :nat,
     "String" => :string,
     "Bool" => :bool,
-    "Unit" => :unit
+    "Unit" => :unit,
+    "F32" => :f32,
+    "Char" => :char
   }
 
   @doc "The marshalled type a Bend type spells, if any."
@@ -156,12 +164,38 @@ defmodule Bendler.Sig do
   def parse_type(text) do
     tokens = Regex.scan(~r/[A-Za-z_][\w.]*|&[012]|[^\s]/, text) |> List.flatten()
 
-    with {:ok, type, []} <- product(tokens, 0), true <- type_depth(type) <= 32 do
+    with {:ok, type, []} <- top_type(tokens), true <- type_depth(type) <= 32 do
       {:ok, type}
     else
       _ -> {:error, "unsupported type #{text}"}
     end
   end
+
+  @doc "The kind index (1 or 2) and value type text of a `Map<...>` type, as written."
+  @spec map_parts(String.t()) :: {1 | 2, String.t()}
+  def map_parts(text) do
+    [_, kind, value] = Regex.run(~r/^\+?Map<\s*(?:(&[12])\s*,)?\s*(.+)>$/s, String.trim(text))
+    {if(kind == "&2", do: 2, else: 1), String.trim(value)}
+  end
+
+  # A Map is only a whole parameter or result: the shim converts it with
+  # Base's Map.from_list and Map.to_list, which cannot reach into a value.
+  defp top_type(["+", "Map", "<" | rest]), do: top_type(["Map", "<" | rest])
+
+  defp top_type(["Map", "<" | rest]) do
+    rest =
+      case rest do
+        [kind, "," | tail] when kind in ["&1", "&2"] -> tail
+        _ -> rest
+      end
+
+    case product(rest, 1) do
+      {:ok, value, [">" | tail]} -> {:ok, {:map, value}, tail}
+      _ -> :error
+    end
+  end
+
+  defp top_type(tokens), do: product(tokens, 0)
 
   defp type_depth({:tuple, ts}), do: 1 + Enum.max(Enum.map(ts, &type_depth/1))
   defp type_depth({:result, e, t}), do: 1 + max(type_depth(e), type_depth(t))
@@ -241,6 +275,9 @@ defmodule Bendler.Sig do
   def spec(:bool), do: "b"
   def spec(:unit), do: "t"
   def spec(:bytes), do: "y"
+  def spec(:f32), do: "f"
+  def spec(:char), do: "c"
+  def spec({:map, t}), do: spec({:list, {:tuple, [:string, t]}})
   def spec({:list, t}), do: "L" <> spec(t)
   def spec({:tuple, ts}), do: "T#{length(ts)}:" <> Enum.map_join(ts, &spec/1)
   def spec({:maybe, t}), do: "M" <> spec(t)
@@ -254,6 +291,9 @@ defmodule Bendler.Sig do
   def typespec(:bool), do: quote(do: boolean())
   def typespec(:unit), do: quote(do: :unit)
   def typespec(:bytes), do: quote(do: binary())
+  def typespec(:f32), do: quote(do: float() | :nan | :infinity | :neg_infinity)
+  def typespec(:char), do: quote(do: char())
+  def typespec({:map, t}), do: quote(do: %{optional(String.t()) => unquote(typespec(t))})
   def typespec({:list, t}), do: quote(do: [unquote(typespec(t))])
   def typespec({:tuple, ts}), do: {:{}, [], Enum.map(ts, &typespec/1)}
   def typespec({:maybe, t}), do: quote(do: :none | {:some, unquote(typespec(t))})

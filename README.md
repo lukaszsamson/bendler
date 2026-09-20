@@ -96,10 +96,16 @@ override the module's. Put it under a supervisor before calling it.
 | `A & B`, `A & B & C` | `{a, b}`, `{a, b, c}` (2–16 fields) |
 | `Maybe<T>` | `:none` or `{:some, value}` |
 | `Result<E, T>` | `{:error, error}` or `{:ok, value}` |
+| `F32` | float, rounded to single precision; `:nan`, `:infinity`, `:neg_infinity` for the values the BEAM has no float for |
+| `Char` | integer code point (`0..0x10FFFF`, no surrogates) |
+| `Map<V>` (also `Map<&2, V>`), a whole parameter or result | map with binary keys |
 
-These types compose recursively, including bytes inside tuples and variants.
-See [type contracts](docs/TYPES.md) for nesting limits, parentheses and the
-distinction between Result failures (data) and transport exceptions.
+These types compose recursively, including bytes inside tuples and variants;
+only `Map` has to be a whole parameter or result, because it crosses as a
+list of pairs that Base's `Map.from_list` and `Map.to_list` convert on the
+Bend side. See [type contracts](docs/TYPES.md) for nesting limits,
+parentheses, the float policy and the distinction between Result failures
+(data) and transport exceptions.
 
 `Bytes` comes from a small Bend prelude, `bendler.bend`, that the build
 writes next to any source using it; import it as `import ./bendler.bend

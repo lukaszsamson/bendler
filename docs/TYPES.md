@@ -52,3 +52,43 @@ negotiation is provided. Generated modules receive matching Elixir specs.
 
 See `test/composite_test.exs` for nested values and both transports, and
 `demos/csv/` for a real parser using all three new type families.
+
+## F32, Char and Map
+
+| Bend | Elixir |
+|---|---|
+| `F32` | float; `:nan`, `:infinity`, `:neg_infinity` |
+| `Char` | integer code point |
+| `Map<V>`, `Map<&2, V>` | `%{binary => v}` |
+
+**F32.** Bend 2 has no `F64`, so the boundary is single precision and says
+so: an Elixir double is rounded to the nearest single on the way in
+(`0.1` arrives as `0.10000000149011612`) and a double past the single
+range (`abs(x) >= 3.4028235677973366e38`) raises `ArgumentError` rather
+than silently becoming an infinity. Integers are not accepted. The BEAM has
+no NaN or infinite floats, so those cross as the atoms `:nan`, `:infinity`
+and `:neg_infinity` in both directions. `-0.0` survives. Wire tag 13 holds
+the IEEE-754 bits; at runtime an `F32` term is the bare 32-bit word, like a
+`U32`, so the C codec copies it without conversion.
+
+**Char.** `Chr{code: U32}` is a newtype the compiler erases: a `Char` term
+is the bare code point, and `String` cells hold the same words. Wire tag 14
+carries 4 bytes. A request Char must be a code point (`0..0x10FFFF`, no
+surrogate) or the native validator refuses the request before dispatch; a
+reply Char is checked in Elixir, since Bend can build any `Chr{U32}`.
+`List<&2, Char>` is what `String.to_list` returns and is exported as a
+charlist.
+
+**Map.** Base's `Map<a, V>` is a Patricia trie on string keys. Laying it out
+from C would tie bendler to its internals, so the wire form is the pair list
+`List<&k, Sigma<&2, &k, String, _ => V>>` and the generated shim wraps the
+user's def: `M.f(Map.from_list(&k, V, xs))` on the way in and
+`Map.to_list(&k, V, M.f(...))` on the way out, with `k` the kind the
+signature wrote (`Map<V>` is `Map<&1, V>`; `Map.get` and reusable `+`
+binders want `Map<&2, V>`). Building the trie is `O(n log n)` string
+comparisons in Bend, which is the cost of not knowing the layout. Because
+the conversion wraps the whole call, a Map must be a whole parameter or
+result; `List<Map<U32>>` or `Map<U32> & U32` keep a def out. Keys are
+binaries; an Elixir map with other keys raises `ArgumentError` on encode.
+The Elixir side receives the pair list and builds the map in `check/3`;
+duplicates cannot occur because the trie has none.

@@ -63,8 +63,8 @@ defmodule Bendler.CompositeTest do
     for frame <- [<<8, 0>>, <<8, 17>>, <<8, 2, 5>>, <<10>>, <<11>>, <<12>>, <<11, 0, 0::32>>],
         do: assert_raise(Bendler.Error, fn -> Codec.decode(frame) end)
 
-    assert_raise ArgumentError, fn -> Codec.encode(nil, {:maybe, :u32}) end
-    assert_raise ArgumentError, fn -> Codec.encode({1}, {:tuple, [:u32, :u32]}) end
+    for {bad, t} <- [{nil, {:maybe, :u32}}, {{1}, {:tuple, [:u32, :u32]}}],
+        do: assert_raise(ArgumentError, fn -> Codec.encode(bad, t) end)
   end
 
   test "native validation rejects malformed composite frames without poisoning either runtime" do
@@ -98,5 +98,114 @@ defmodule Bendler.CompositeTest do
 
     assert CompositePort.optional({:some, :none}) == {:some, :none}
     assert CompositeNif.result({:ok, []}) == {:ok, []}
+  end
+
+  test "F32, Char and Map signatures" do
+    assert Sig.parse_type("F32") == {:ok, :f32}
+    assert Sig.parse_type("List<&2, Char>") == {:ok, {:list, :char}}
+    assert Sig.parse_type("Map<U32>") == {:ok, {:map, :u32}}
+    assert Sig.parse_type("+Map<&2, List<B.Bytes>>") == {:ok, {:map, {:list, :bytes}}}
+    assert Sig.parse_type("Map<(String & F32)>") == {:ok, {:map, {:tuple, [:string, :f32]}}}
+    assert Sig.map_parts("Map<&2, List<B.Bytes>>") == {2, "List<B.Bytes>"}
+    assert Sig.map_parts("+Map<U32>") == {1, "U32"}
+    # a Map is a whole parameter or result, never a part of one
+    for bad <- ["List<Map<U32>>", "Map<U32> & U32", "Maybe<Map<U32>>", "Map<>", "Map<&0, U32>"],
+        do: assert({:error, _} = Sig.parse_type(bad))
+
+    assert Sig.spec({:map, {:list, :f32}}) == "LT2:sLf"
+    assert Sig.spec(:char) == "c"
+  end
+
+  for backend <- [CompositePort, CompositeNif] do
+    @backend backend
+    test "F32, Char and Map round trip through #{inspect(backend)}" do
+      if @backend == CompositePort, do: start_supervised!({CompositePort, []})
+      assert @backend.half(3.0) == 1.5
+      # an Elixir double rounds to the nearest single on the way in
+      assert @backend.half(0.1) == 0.05000000074505806
+      assert @backend.half(-1.0e-45) == -0.0
+      assert @backend.f32_div(1.0, 0.0) == :infinity
+      assert @backend.f32_div(-1.0, 0.0) == :neg_infinity
+      assert @backend.f32_div(0.0, 0.0) == :nan
+      assert @backend.half(:nan) == :nan
+      assert @backend.half(:infinity) == :infinity
+      assert @backend.half(:neg_infinity) == :neg_infinity
+
+      assert @backend.upper(?a) == ?A
+      assert @backend.upper(0x1F600) == 0x1F600
+      assert @backend.chars("zażółć") == String.to_charlist("zażółć")
+      assert @backend.from_chars([?h, ?i, 0x10FFFF]) == "hi" <> <<0x10FFFF::utf8>>
+
+      assert @backend.tally(~w(a b a c a b)) == %{"a" => 3, "b" => 2, "c" => 1}
+      assert @backend.tally([]) == %{}
+      assert @backend.total(%{"x" => 1, "y" => 2, "zz" => 39}) == 42
+      assert @backend.total(%{}) == 0
+      assert @backend.scale(%{"p" => 1.5, "q" => -2.0}, 2.0) == %{"p" => 3.0, "q" => -4.0}
+      blobs = %{"" => [], "k" => [<<>>, <<1, 2, 3>>], "zażółć" => [<<255>>]}
+      assert @backend.blobs(blobs) == blobs
+
+      # 4096 keys exercise the trie past a few levels
+      big = Map.new(1..4096, &{"key#{&1}", &1})
+      assert @backend.total(big) == Enum.sum(1..4096)
+    end
+  end
+
+  test "F32, Char and Map codec policies" do
+    assert Codec.encode(1.0, :f32) == <<13, 1.0::float-32>>
+    assert Codec.encode(:nan, :f32) == <<13, 0x7FC00000::32>>
+    assert Codec.reply(<<13, 0xFF800000::32>>) == :neg_infinity
+    assert Codec.reply(<<13, 0x7F800001::32>>) == :nan
+    f32_max = 3.402_823_466_385_288_6e38
+    assert Codec.reply(<<13, f32_max::float-32>>) == f32_max
+    # past the single range: no silent infinity
+    for bad <- [3.5e38, -3.5e38, 1, "1.0"],
+        do: assert_raise(ArgumentError, fn -> Codec.encode(bad, :f32) end)
+
+    assert Codec.encode(?é, :char) == <<14, ?é::32>>
+
+    for bad <- [-1, 0xD800, 0xDFFF, 0x110000, "a"],
+        do: assert_raise(ArgumentError, fn -> Codec.encode(bad, :char) end)
+
+    # a reply Char is checked on the host: Bend can build any Chr{U32}
+    assert_raise Bendler.Error, fn -> Codec.check(Codec.reply(<<14, 0xD800::32>>), :char, :f) end
+
+    assert Codec.encode(%{"a" => 1}, {:map, :u32}) == <<6, 1::32, 8, 2, 3, 1::32, "a", 1, 1::32>>
+
+    for bad <- [%{a: 1}, [{"a", 1}], %{"a" => -1}],
+        do: assert_raise(ArgumentError, fn -> Codec.encode(bad, {:map, :u32}) end)
+
+    assert Codec.check([{"a", 1}, {"b", 2}], {:map, :u32}, :f) == %{"a" => 1, "b" => 2}
+  end
+
+  test "native validation rejects a bad Char and an F32 of the wrong width" do
+    start_supervised!({CompositePort, []})
+
+    upper =
+      Enum.find_index(
+        elem(Sig.parse(File.read!("bend/composite.bend")), 0),
+        &(&1.name == "upper")
+      )
+
+    half =
+      Enum.find_index(elem(Sig.parse(File.read!("bend/composite.bend")), 0), &(&1.name == "half"))
+
+    frames = [
+      <<upper::32, 14, 0xD800::32>>,
+      <<upper::32, 14, 0x110000::32>>,
+      <<upper::32, 1, ?a::32>>,
+      <<half::32, 13, 0, 0>>,
+      <<half::32, 1, 0::32>>
+    ]
+
+    for frame <- frames do
+      assert_raise Bendler.Error, ~r/expected an? (Char|F32)/, fn ->
+        CompositePort |> Bendler.Port.call(frame) |> Codec.reply()
+      end
+
+      assert {:error, {:invalid, _}} = CompositeNif.__bendler_call(frame, 1000)
+    end
+
+    assert CompositePort.upper(?z) == ?Z
+    assert CompositeNif.half(2.0) == 1.0
   end
 end
