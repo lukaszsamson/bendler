@@ -5,14 +5,26 @@ defmodule Bendler.Sig do
 
   A def is exportable when every parameter and its result are of a marshalled
   type: `U32`, `Nat`, `String`, `Bool`, `Unit`, `Bytes` (the prelude's
-  `B.Bytes`, an Elixir binary) and `List<T>` of those (also written
-  `+List<T>` or `List<&2, T>`). Erased (`-`) and template (`~`) parameters,
+  `B.Bytes`, an Elixir binary), and recursively `List<T>`, products `A & B`,
+  `Maybe<T>` and `Result<E, T>`. Products have 2–16 fields; nesting is capped
+  at 32. Kind-qualified generics and reusable (`+`) types are accepted.
+  Erased (`-`) and template (`~`) parameters,
   `IO` results and every other type keep a def out.
   """
 
   defstruct [:name, :params, :ret, :line]
 
-  @type type :: :u32 | :nat | :string | :bool | :unit | :bytes | {:list, type}
+  @type type ::
+          :u32
+          | :nat
+          | :string
+          | :bool
+          | :unit
+          | :bytes
+          | {:list, type}
+          | {:tuple, [type]}
+          | {:maybe, type}
+          | {:result, type, type}
   @type param :: %{name: String.t(), type: type, text: String.t(), reusable: boolean}
   @type t :: %__MODULE__{
           name: String.t(),
@@ -138,31 +150,90 @@ defmodule Bendler.Sig do
     "Bool" => :bool,
     "Unit" => :unit
   }
-  @list_re ~r/^List<(?:&[012]\s*,\s*)?(.+)>$/
 
   @doc "The marshalled type a Bend type spells, if any."
   @spec parse_type(String.t()) :: {:ok, type} | {:error, String.t()}
   def parse_type(text) do
-    case String.trim(text) do
-      "+" <> rest -> parse_type(rest)
-      other -> word_or_list(Map.get(@word_types, other) || bytes_type(other), other)
+    tokens = Regex.scan(~r/[A-Za-z_][\w.]*|&[012]|[^\s]/, text) |> List.flatten()
+
+    with {:ok, type, []} <- product(tokens, 0), true <- type_depth(type) <= 32 do
+      {:ok, type}
+    else
+      _ -> {:error, "unsupported type #{text}"}
     end
   end
+
+  defp type_depth({:tuple, ts}), do: 1 + Enum.max(Enum.map(ts, &type_depth/1))
+  defp type_depth({:result, e, t}), do: 1 + max(type_depth(e), type_depth(t))
+  defp type_depth({_, t}), do: 1 + type_depth(t)
+  defp type_depth(_), do: 0
 
   # the prelude's Bytes, under whatever alias the file imported it
   defp bytes_type(text), do: if(Regex.match?(~r/^(?:\w+\.)?Bytes$/, text), do: :bytes)
 
-  defp word_or_list(nil, text), do: list_type(text)
-  defp word_or_list(type, _text), do: {:ok, type}
-
-  defp list_type(text) do
-    case Regex.run(@list_re, text) do
-      [_, inner] -> with {:ok, t} <- parse_type(inner), do: {:ok, {:list, t}}
-      nil -> {:error, "unsupported type #{text}"}
+  # Bounded recursive descent. Product binds outside generic arguments;
+  # parentheses preserve nested tuples instead of flattening them.
+  defp product(tokens, depth) do
+    with {:ok, first, rest} <- atom_type(tokens, depth) do
+      product_tail([first], rest, depth)
     end
   end
 
-  @doc "The one-letter spec the C codec reads: u n s b t, and L before an element."
+  defp product_tail(types, ["&" | rest], depth) when length(types) < 16 do
+    with {:ok, next, tail} <- atom_type(rest, depth + 1) do
+      product_tail(types ++ [next], tail, depth)
+    end
+  end
+
+  defp product_tail([type], rest, _), do: {:ok, type, rest}
+  defp product_tail(types, rest, _), do: {:ok, {:tuple, types}, rest}
+
+  defp atom_type(_, depth) when depth > 32, do: :error
+  defp atom_type(["+" | rest], depth), do: atom_type(rest, depth + 1)
+
+  defp atom_type(["(" | rest], depth) do
+    case product(rest, depth + 1) do
+      {:ok, type, [")" | tail]} -> {:ok, type, tail}
+      _ -> :error
+    end
+  end
+
+  defp atom_type([name, "<" | rest], depth) when name in ["List", "Maybe", "Result"] do
+    rest = drop_kinds(rest, if(name == "Result", do: 2, else: 1))
+
+    with {:ok, first, tail} <- product(rest, depth + 1) do
+      generic(name, first, tail, depth)
+    end
+  end
+
+  defp atom_type([word | rest], _) do
+    case Map.get(@word_types, word) || bytes_type(word) do
+      nil -> :error
+      type -> {:ok, type, rest}
+    end
+  end
+
+  defp atom_type([], _), do: :error
+
+  defp drop_kinds([a, ",", b, "," | rest], 2)
+       when a in ["&0", "&1", "&2"] and b in ["&0", "&1", "&2"], do: rest
+
+  defp drop_kinds([kind, "," | rest], 1) when kind in ["&0", "&1", "&2"], do: rest
+
+  defp drop_kinds(tokens, _), do: tokens
+  defp generic("List", type, [">" | rest], _), do: {:ok, {:list, type}, rest}
+  defp generic("Maybe", type, [">" | rest], _), do: {:ok, {:maybe, type}, rest}
+
+  defp generic("Result", error, ["," | rest], depth) do
+    case product(rest, depth + 1) do
+      {:ok, value, [">" | tail]} -> {:ok, {:result, error, value}, tail}
+      _ -> :error
+    end
+  end
+
+  defp generic(_, _, _, _), do: :error
+
+  @doc "The C codec's prefix type grammar: primitives, L/M child, R error/value, T arity:fields."
   @spec spec(type) :: String.t()
   def spec(:u32), do: "u"
   def spec(:nat), do: "n"
@@ -171,8 +242,12 @@ defmodule Bendler.Sig do
   def spec(:unit), do: "t"
   def spec(:bytes), do: "y"
   def spec({:list, t}), do: "L" <> spec(t)
+  def spec({:tuple, ts}), do: "T#{length(ts)}:" <> Enum.map_join(ts, &spec/1)
+  def spec({:maybe, t}), do: "M" <> spec(t)
+  def spec({:result, e, t}), do: "R" <> spec(e) <> spec(t)
 
   @doc "The Elixir typespec of a marshalled type."
+  @spec typespec(type) :: Macro.t()
   def typespec(:u32), do: quote(do: non_neg_integer())
   def typespec(:nat), do: quote(do: non_neg_integer())
   def typespec(:string), do: quote(do: String.t())
@@ -180,4 +255,9 @@ defmodule Bendler.Sig do
   def typespec(:unit), do: quote(do: :unit)
   def typespec(:bytes), do: quote(do: binary())
   def typespec({:list, t}), do: quote(do: [unquote(typespec(t))])
+  def typespec({:tuple, ts}), do: {:{}, [], Enum.map(ts, &typespec/1)}
+  def typespec({:maybe, t}), do: quote(do: :none | {:some, unquote(typespec(t))})
+
+  def typespec({:result, e, t}),
+    do: quote(do: {:ok, unquote(typespec(t))} | {:error, unquote(typespec(e))})
 end

@@ -26,10 +26,13 @@ defmodule BendlerTest do
       {sigs, skipped} = Sig.parse(File.read!("bend/fib.bend"))
 
       assert Enum.map(sigs, & &1.name) ==
-               ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte)
+               ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte.fin second_byte)
 
       assert Enum.find(sigs, &(&1.name == "rev_bytes")).ret == {:bytes, "B.Bytes"}
-      assert skipped == [{"second_byte.fin", "parameter r: unsupported type B.Bytes & U32"}]
+      assert skipped == []
+
+      assert [%{type: {:tuple, [:bytes, :u32]}}] =
+               Enum.find(sigs, &(&1.name == "second_byte.fin")).params
 
       {sigs, skipped} =
         Sig.parse("""

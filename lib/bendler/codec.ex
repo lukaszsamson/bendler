@@ -7,6 +7,11 @@ defmodule Bendler.Codec do
       0 error (len32 + message)  1 U32 (4 bytes)  2 Nat (8 bytes, < 2^48)
       3 String (len32)           4 Bool (1 byte)  5 Unit
       6 List (count32, then the items)  7 Bytes (len32, raw bytes)
+      8 Tuple (arity8, then fields)    9 None    10 Some (value)
+      11 Done (value)                  12 Fail (error)
+
+  A Result's Fail is returned as `{:error, value}`; only tag 0 raises a
+  transport error. Composite values may nest up to 32 levels.
   """
 
   @nat_max Integer.pow(2, 48) - 1
@@ -32,19 +37,36 @@ defmodule Bendler.Codec do
   def encode(v, {:list, t}) when is_list(v),
     do: <<6, length(v)::32>> <> Enum.map_join(v, &encode(&1, t))
 
+  def encode(v, {:tuple, ts})
+      when is_tuple(v) and tuple_size(v) == length(ts) and length(ts) in 2..16,
+      do:
+        <<8, length(ts)>> <>
+          (Enum.zip(Tuple.to_list(v), ts) |> Enum.map_join(fn {x, t} -> encode(x, t) end))
+
+  def encode(:none, {:maybe, _}), do: <<9>>
+  def encode({:some, v}, {:maybe, t}), do: <<10>> <> encode(v, t)
+  def encode({:ok, v}, {:result, _, t}), do: <<11>> <> encode(v, t)
+  def encode({:error, v}, {:result, e, _}), do: <<12>> <> encode(v, e)
+
   def encode(v, t) do
     raise ArgumentError, "cannot encode #{inspect(v)} as Bend #{describe(t)}"
   end
 
   @doc "The value a reply frame holds; raises Bendler.Error on the error tag."
   @spec reply(binary, atom) :: term
-  def reply(bin, fun \\ :call) do
-    case decode(bin) do
-      {{:error, msg}, _} ->
-        raise Bendler.Error,
-          message: "#{fun}: the Bend program refused the request: #{msg}",
-          reason: :refused
+  def reply(bin, fun \\ :call)
 
+  def reply(<<0, _::binary>> = bin, fun) do
+    {{:error, msg}, rest} = decode(bin)
+    if rest != <<>>, do: raise(Bendler.Error, "malformed transport error")
+
+    raise Bendler.Error,
+      message: "#{fun}: the Bend program refused the request: #{msg}",
+      reason: :refused
+  end
+
+  def reply(bin, fun) do
+    case decode(bin) do
       {v, <<>>} ->
         v
 
@@ -69,22 +91,49 @@ defmodule Bendler.Codec do
   defp typed?(v, :bytes), do: is_binary(v)
   defp typed?(v, {:list, t}), do: is_list(v) and Enum.all?(v, &typed?(&1, t))
 
+  defp typed?(v, {:tuple, ts}) when is_tuple(v) and tuple_size(v) == length(ts),
+    do: Enum.zip(Tuple.to_list(v), ts) |> Enum.all?(fn {x, t} -> typed?(x, t) end)
+
+  defp typed?(:none, {:maybe, _}), do: true
+  defp typed?({:some, v}, {:maybe, t}), do: typed?(v, t)
+  defp typed?({:ok, v}, {:result, _, t}), do: typed?(v, t)
+  defp typed?({:error, v}, {:result, e, _}), do: typed?(v, e)
+  defp typed?(_, _), do: false
+
   @doc "Decodes one value, returning it beside the rest of the binary."
   @spec decode(binary) :: {term, binary}
-  def decode(<<0, n::32, msg::binary-size(n), r::binary>>), do: {{:error, msg}, r}
-  def decode(<<1, v::32, r::binary>>), do: {v, r}
-  def decode(<<2, v::64, r::binary>>) when v <= @nat_max, do: {v, r}
-  def decode(<<3, n::32, s::binary-size(n), r::binary>>), do: {s, r}
-  def decode(<<4, b, r::binary>>) when b in [0, 1], do: {b == 1, r}
-  def decode(<<5, r::binary>>), do: {:unit, r}
-  def decode(<<7, n::32, s::binary-size(n), r::binary>>), do: {s, r}
+  def decode(bin), do: decode_value(bin, 0)
+  defp decode_value(_, depth) when depth > 32, do: raise(Bendler.Error, "reply nested too deep")
+  defp decode_value(<<0, n::32, msg::binary-size(n), r::binary>>, 0), do: {{:error, msg}, r}
+  defp decode_value(<<1, v::32, r::binary>>, _), do: {v, r}
+  defp decode_value(<<2, v::64, r::binary>>, _) when v <= @nat_max, do: {v, r}
+  defp decode_value(<<3, n::32, s::binary-size(n), r::binary>>, _), do: {s, r}
+  defp decode_value(<<4, b, r::binary>>, _) when b in [0, 1], do: {b == 1, r}
+  defp decode_value(<<5, r::binary>>, _), do: {:unit, r}
+  defp decode_value(<<7, n::32, s::binary-size(n), r::binary>>, _), do: {s, r}
 
-  # every item takes at least a tag byte: a count past the binary is a lie
-  def decode(<<6, n::32, r::binary>>) when n <= byte_size(r) do
-    Enum.map_reduce(List.duplicate(nil, n), r, fn _, r -> decode(r) end)
+  defp decode_value(<<8, n, r::binary>>, d) when n in 2..16 and n <= byte_size(r) do
+    {xs, rest} = decode_items(n, r, d)
+    {List.to_tuple(xs), rest}
   end
 
-  def decode(other), do: raise(Bendler.Error, "malformed reply: #{inspect(other)}")
+  defp decode_value(<<9, r::binary>>, _), do: {:none, r}
+
+  defp decode_value(<<tag, r::binary>>, d) when tag in [10, 11, 12] do
+    {v, rest} = decode_value(r, d + 1)
+    label = %{10 => :some, 11 => :ok, 12 => :error}[tag]
+    {{label, v}, rest}
+  end
+
+  # every item takes at least a tag byte: a count past the binary is a lie
+  defp decode_value(<<6, n::32, r::binary>>, d) when n <= byte_size(r) do
+    decode_items(n, r, d)
+  end
+
+  defp decode_value(other, _), do: raise(Bendler.Error, "malformed reply: #{inspect(other)}")
+
+  defp decode_items(n, r, d),
+    do: Enum.map_reduce(List.duplicate(nil, n), r, fn _, r -> decode_value(r, d + 1) end)
 
   defp describe(:u32), do: "U32 (an integer in 0..2^32-1)"
   defp describe(:nat), do: "Nat (an integer in 0..2^48-1)"
@@ -93,6 +142,9 @@ defmodule Bendler.Codec do
   defp describe(:unit), do: "Unit (the atom :unit)"
   defp describe(:bytes), do: "Bytes (a binary)"
   defp describe({:list, t}), do: "List of #{describe(t)}"
+  defp describe({:tuple, ts}), do: "tuple of (#{Enum.map_join(ts, ", ", &describe/1)})"
+  defp describe({:maybe, t}), do: "Maybe<#{describe(t)}>"
+  defp describe({:result, e, t}), do: "Result<#{describe(e)}, #{describe(t)}>"
 end
 
 defmodule Bendler.Error do

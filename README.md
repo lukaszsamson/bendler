@@ -93,6 +93,13 @@ override the module's. Put it under a supervisor before calling it.
 | `Unit` | `:unit` |
 | `List<T>` (also `+List<T>`, `List<&2, T>`) | list |
 | `B.Bytes` (the prelude's) | binary |
+| `A & B`, `A & B & C` | `{a, b}`, `{a, b, c}` (2–16 fields) |
+| `Maybe<T>` | `:none` or `{:some, value}` |
+| `Result<E, T>` | `{:error, error}` or `{:ok, value}` |
+
+These types compose recursively, including bytes inside tuples and variants.
+See [type contracts](docs/TYPES.md) for nesting limits, parentheses and the
+distinction between Result failures (data) and transport exceptions.
 
 `Bytes` comes from a small Bend prelude, `bendler.bend`, that the build
 writes next to any source using it; import it as `import ./bendler.bend
@@ -198,6 +205,15 @@ never has to know the layout of a user constructor.
   includes the `bend version`).
 
 ## Layout
+
+The [parallel Mandelbrot demo](demos/mandelbrot/README.md) compares a
+CPU Port kernel with scalar Elixir and Nx/EXLA, including thread scaling,
+exact upstream checksums, and reproducible benchmark commands.
+The [sorting and set-operations demo](demos/sorting/README.md) compares
+tree-bitonic sorting with `Enum.sort` and `MapSet`, including list round-trip
+costs and cases where more Bend workers make performance worse.
+The [small CSV parser](demos/csv/README.md) uses tuples, Maybe and Result,
+with byte-preserving fields and differential tests against NimbleCSV.
 
 ```
 lib/bendler.ex          use Bendler: builds at compile time, defines the functions

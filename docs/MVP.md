@@ -62,14 +62,14 @@ functions. In order:
 
 ## 3. Next, driven by real workloads
 
-Each row is a Base type the runtime lays out itself, so the C side stays
-ignorant of user constructors.
+Prefer Base types with compiler-defined canonical boxing, plus the controlled
+Bytes prelude. Arbitrary user constructors still need generated converters.
 
 | add | Bend | Elixir | notes |
 |---|---|---|---|
 | [x] bytes (done) | `B.Bytes{len, buf: Array<U32>}` from the prelude | binary | one buffer block each way; Murmur3 on 64 KB went from 8.5 ms to 0.28 ms, ThumbHash 100x100 from 10.8 ms to 5.8 ms |
-| [ ] tuples | `A & B` | `{a, b}` | `CID_TUPLE` node |
-| [ ] `Maybe`, `Result` | `Maybe<..>`, `Result<..>` | tagged: `{:some, v} \| :none`, `{:ok, v} \| {:error, {code, msg}}` | tagged, not `nil \| v`, so nested options stay unambiguous |
+| [x] tuples | `A & B`, `A & B & C` | `{a, b}`, `{a, b, c}` | 2–16 fields; parentheses preserve nesting; canonical Base Tuple nodes |
+| [x] `Maybe`, `Result` | `Maybe<T>`, `Result<E, T>` | `{:some, v} \| :none`, `{:ok, v} \| {:error, e}` | recursively composable; errors are arbitrary supported values; tested on both backends; see TYPES.md |
 | [ ] `F32` | `F32` | float | explicit conversion, range and non-finite policies; then ThumbHash |
 | [ ] `Char` | `Char` | integer code point | packed `CID_CHR` |
 | [ ] `Map` (string keys) | `Map<V>` | map with binary keys | Base has `new set get has del keys` |
@@ -142,12 +142,32 @@ small interface, and where Bend's parallelism can show. In order:
    9 ms against 18 ms for `Task.async_stream`.)
 4. **A parallel numeric kernel** from Bend's own `bench/runtime/` (nbody,
    mandelbrot, k-means) exposed to Elixir and compared with `Nx` on the
-   CPU. This is the "why would I do this" demo.
+   CPU. (done: `demos/mandelbrot/` adapts the upstream fixed-point
+   histogram/recolour checksum, with five tests including the full
+   4096x4096 known answer, an independent Elixir reference, and a separate
+   pinned Nx/EXLA host-CPU benchmark. At 262,144 pixels / 31 iterations on
+   M2 Pro: Elixir 568.7 ms; Bend Port 59.4 / 15.2 / 7.9 ms with 1 / 4 / 12
+   threads; Nx/EXLA 8.4 ms. Small strips, not resized full images; Nx caches
+   escape times whereas upstream Bend recomputes them. See the demo README
+   for methodology and limitations. No new codec types were needed; GPU
+   binding builds remain deferred.)
 5. **Sorting and set operations** on `List<U32>`: Bend's bitonic sort vs
-   `Enum.sort`. Tests the list transfer cost against the parallel gain.
-6. Stretch: a small parser (`NimbleCSV`-sized) to see how far user
-   datatypes and `Maybe`/`Result` get before the converter generator
-   (track 3) is needed.
+   `Enum.sort`. (done: `demos/sorting/` adapts the upstream tree-bitonic
+   network to arbitrary-length lists, with unique/union/intersection/left
+   difference and four differential tests. Five-sample CPU benchmarks on
+   M2 Pro: random 32,768-element sort takes Enum 2.2 ms vs Bend 29.6 / 44.1 /
+   50.0 ms with 1 / 4 / 12 workers; one-worker identity round trip is 7.9 ms.
+   MapSet plus sorted output also wins all measured set operations. Keep
+   these workloads in Elixir; investigate fork granularity, list/tree
+   allocation and packed U32 buffers before expecting a parallel gain.
+   No codec or GPU extension was needed; see the demo README for caveats.)
+6. **Small CSV parser** (done: `demos/csv/`), based on NimbleCSV's eager,
+   byte-oriented semantics. Delimiters use Maybe; results carry nested lists
+   of Bytes plus a tuple row count, or a structured error tuple. Differential
+   fixtures and generated tables pass. This is a bounded subset, not a
+   replacement for NimbleCSV's streaming/configurable parser. At 10,000 rows,
+   NimbleCSV wins: plain 5.7 vs 28.4 ms, quoted 35.2 vs 98.1 ms. No additional
+   user-datatype converter was needed: private parser state stays in Bend.
 
 Data interoperability comes before more of the BEAM C API: keep
 processes, ETS, supervision and IO in Elixir; add `F32` and buffers when a

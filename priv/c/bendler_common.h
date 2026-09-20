@@ -5,7 +5,8 @@
 #define BENDLER_COMMON_H
 #include "bendler_specs.h"
 
-enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7 };
+enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7,
+       BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12 };
 
 #ifndef BENDLER_MAX_FRAME
 #define BENDLER_MAX_FRAME (64u << 20)   // a request or reply body past this is refused
@@ -13,7 +14,7 @@ enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5,
 #ifndef BENDLER_MAX_ITEMS
 #define BENDLER_MAX_ITEMS (16u << 20)   // list items (all lists together) one request may carry
 #endif
-#define BL_MAX_DEPTH 32                  // list nesting the spec grammar allows
+#define BL_MAX_DEPTH 32                  // composite type/value nesting limit
 
 typedef struct { u8* p; u64 len; u64 cap; } BlBuf;
 
@@ -56,17 +57,29 @@ static void bl_put64(BlBuf* b, u64 v) { bl_put32(b, (u32)(v >> 32)); bl_put32(b,
 static u32  bl_rd32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 static u64  bl_rd64(const u8* p) { return ((u64)bl_rd32(p) << 32) | bl_rd32(p + 4); }
 
-// The spec grammar is unary: one of u n s b t, or L followed by one type.
-// bl_skip_type consumes exactly one type, bounded by the string's NUL.
-static const char* bl_skip_type(const char* ty) {
-  int depth = 0;
-  for (;;) {
-    char k = *ty;
-    if (k == 'L') { if (++depth > BL_MAX_DEPTH) bl_fail("type spec nested too deep"); ty += 1; continue; }
-    if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y') return ty + 1;
-    bl_fail("bad type spec");
+// Prefix grammar: primitives, L/M + one type, R + error/value types,
+// T<arity>: + 2..16 field types. Never scan past a NUL or an unbounded depth.
+static int bl_tuple_arity(const char** ty) {
+  int n = 0, digits = 0;
+  while (**ty >= '0' && **ty <= '9' && digits < 2) {
+    n = n * 10 + *(*ty)++ - '0'; digits += 1;
   }
+  if (**ty != ':' || n < 2 || n > 16) bl_fail("bad tuple arity");
+  *ty += 1;
+  return n;
 }
+static const char* bl_skip_at(const char* ty, int depth) {
+  if (depth > BL_MAX_DEPTH) bl_fail("type spec nested too deep");
+  char k = *ty;
+  if (k == 0) bl_fail("truncated type spec");
+  ty += 1;
+  if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y') return ty;
+  int n = k == 'L' || k == 'M' ? 1 : k == 'R' ? 2 : k == 'T' ? bl_tuple_arity(&ty) : 0;
+  if (n == 0) bl_fail("bad type spec");
+  for (int i = 0; i < n; i += 1) ty = bl_skip_at(ty, depth + 1);
+  return ty;
+}
+static const char* bl_skip_type(const char* ty) { return bl_skip_at(ty, 0); }
 
 // Validation
 // ==========
@@ -77,10 +90,33 @@ typedef struct { const u8* p; const u8* end; u64 items; const char* err; } BlChe
 
 static void bl_check(BlCheck* c, const char** ty, int depth) {
   if (c->err) return;
+  if (depth > BL_MAX_DEPTH) { c->err = "value nested too deep"; return; }
   char k = *(*ty)++;
   if (c->p >= c->end) { c->err = "truncated request"; return; }
   u8 tag = *c->p++;
   switch (k) {
+    case 'T': {
+      int n = bl_tuple_arity(ty);
+      if (tag != BL_TUPLE || c->p >= c->end || *c->p++ != n) { c->err = "expected a Tuple"; return; }
+      c->items += n;
+      if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many items"; return; }
+      for (int i = 0; i < n && !c->err; i += 1) bl_check(c, ty, depth + 1);
+      return;
+    }
+    case 'M': {
+      const char* end = bl_skip_type(*ty);
+      if (tag == BL_SOME) bl_check(c, ty, depth + 1);
+      else if (tag != BL_NONE) c->err = "expected a Maybe";
+      *ty = end; return;
+    }
+    case 'R': {
+      const char* value = bl_skip_type(*ty);
+      const char* end = bl_skip_type(value);
+      if (tag == BL_OK) { *ty = value; bl_check(c, ty, depth + 1); }
+      else if (tag == BL_FAIL) bl_check(c, ty, depth + 1);
+      else c->err = "expected a Result";
+      *ty = end; return;
+    }
     case 'u': if (tag != BL_U32 || c->end - c->p < 4) { c->err = "expected a U32"; return; } c->p += 4; return;
     case 'n':
       if (tag != BL_NAT || c->end - c->p < 8) { c->err = "expected a Nat"; return; }
@@ -174,6 +210,26 @@ static Term bl_decode(Env e, const char** ty, int depth) {
   u8 tag = *bl_req++;
   Term t;
   switch (c) {
+    case 'T': {
+      int n = bl_tuple_arity(ty); bl_req += 1; // validated wire arity
+      Term fields[16];
+      for (int i = 0; i < n; i += 1) fields[i] = bl_decode(e, ty, depth + 1);
+      t = fields[n - 1];
+      for (int i = n - 2; i >= 0; i -= 1) t = io_node(e, CID_TUPLE, fields[i], t);
+      break;
+    }
+    case 'M': {
+      const char* end = bl_skip_type(*ty);
+      t = tag == BL_NONE ? term_pak(CID_NONE, 0) : io_box(e, CID_SOME, bl_decode(e, ty, depth + 1));
+      *ty = end; break;
+    }
+    case 'R': {
+      const char* value = bl_skip_type(*ty);
+      const char* end = bl_skip_type(value);
+      if (tag == BL_OK) *ty = value;
+      t = io_box(e, tag == BL_OK ? CID_DONE : CID_FAIL, bl_decode(e, ty, depth + 1));
+      *ty = end; break;
+    }
     case 'u': t = (Term)bl_rd32(bl_req); bl_req += 4; break;
     case 'n': t = (Term)bl_rd64(bl_req); bl_req += 8; break;
     case 's': { u32 n = bl_rd32(bl_req); bl_req += 4; t = io_str(e, (const char*)bl_req, n); bl_req += n; break; }
@@ -206,8 +262,38 @@ static Term bl_decode(Env e, const char** ty, int depth) {
 
 // Encoding: writes the Term x, of the type spelled at *ty, consuming it.
 static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
+  if (depth > BL_MAX_DEPTH) bl_fail("reply nested too deep");
   char c = *(*ty)++;
   switch (c) {
+    case 'T': {
+      int n = bl_tuple_arity(ty);
+      bl_put8(b, BL_TUPLE); bl_put8(b, (u8)n);
+      for (int i = 0; i < n - 1; i += 1) {
+        Term fields[2];
+        spare_free(e, cls_fit(2), ctr_take(e, x, 2, fields));
+        bl_encode(e, ty, fields[0], b, depth + 1); x = fields[1];
+      }
+      bl_encode(e, ty, x, b, depth + 1); break;
+    }
+    case 'M': {
+      const char* end = bl_skip_type(*ty);
+      if (term_aux(x) == CID_NONE) bl_put8(b, BL_NONE);
+      else if (term_aux(x) == CID_SOME) {
+        Term fields[1]; spare_free(e, cls_fit(1), ctr_take(e, x, 1, fields));
+        bl_put8(b, BL_SOME); bl_encode(e, ty, fields[0], b, depth + 1);
+      } else bl_fail("bad Maybe constructor");
+      *ty = end; break;
+    }
+    case 'R': {
+      const char* value = bl_skip_type(*ty);
+      const char* end = bl_skip_type(value);
+      bool ok = term_aux(x) == CID_DONE;
+      if (!ok && term_aux(x) != CID_FAIL) bl_fail("bad Result constructor");
+      if (ok) *ty = value;
+      Term fields[1]; spare_free(e, cls_fit(1), ctr_take(e, x, 1, fields));
+      bl_put8(b, ok ? BL_OK : BL_FAIL); bl_encode(e, ty, fields[0], b, depth + 1);
+      *ty = end; break;
+    }
     case 'u': bl_put8(b, BL_U32); bl_put32(b, (u32)x); break;
     case 'n': bl_put8(b, BL_NAT); bl_put64(b, (u64)x); break;
     case 'b': bl_put8(b, BL_BOOL); bl_put8(b, term_aux(x) == CID_TRUE); break;

@@ -115,3 +115,40 @@ Linux; GPU programs; hostile worker output beyond the frame cap; memory
 growth under sustained load; unload or upgrade of a NIF module (unsupported
 by design); hard cancellation; more than one request in flight; concurrent
 builds; per-environment artifacts.
+
+## CSV and composite types (2026-09-20)
+
+Final full suite: **65 tests passed**. Compilation with warnings-as-errors,
+formatting of changed Elixir files, targeted strict Credo (10 files), Dialyzer
+(zero errors) and documentation generation with warnings-as-errors passed.
+The full test run still prints an existing unused `require Bitwise` warning
+from the ThumbHash test file, which this change does not modify.
+
+Added native Port and NIF coverage for 2–16-field tuples, explicitly nested
+tuples, Maybe, Result, Bytes inside variants, empty nested lists and both
+Result branches. Malformed arities, tags, missing payloads and trailing bytes
+are rejected without poisoning the runtime. Result failures return data;
+transport-error frames still raise and cannot appear inside composite values.
+
+The CSV demo uses NimbleCSV 1.3.0 as an eager-parser oracle. It checks binary
+preservation, CRLF, multiline quotes, escaped quotes, both header policies,
+structured errors and recovery. Forty generated tables round-trip through
+NimbleCSV's dumper, and all 781 length-0–4 inputs over quote/comma/CR/LF/a
+agree on acceptance and successful values. The input wrapper caps input at
+1 MiB; the raw generated function does not impose that demo-specific cap.
+
+Commands: `mix test`; `mix credo 'lib/bendler/{sig,gen,codec}.ex'
+test/composite_test.exs test/support/composite.ex 'demos/csv/**/*.{ex,exs}'
+--strict`; `mix dialyzer`; `mix docs --warnings-as-errors`.
+
+`MIX_ENV=test mix run demos/csv/check_asan.exs` passed 100 cycles against an
+AddressSanitizer-instrumented external port, including empty composite lists,
+nested options/Bytes, Result errors and malformed frames. Leak detection is
+disabled because runtime teardown is not validated. This is not NIF sanitizer
+coverage. A combined ASan/UBSan run stopped in generated runtime `root_done`
+(`shim.c:1269`, zero-offset pointer arithmetic on null); the Bend runtime is
+therefore not claimed UBSan-clean. No workaround patches were applied to it.
+
+Five-sample CPU benchmark results and limitations are in
+`demos/csv/README.md`. NimbleCSV won every measured case. No Linux, streaming,
+GPU or arbitrary-user-datatype claim is made by this demo.

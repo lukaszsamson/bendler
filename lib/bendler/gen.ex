@@ -5,8 +5,8 @@ defmodule Bendler.Gen do
   answers its function index; `Bendler.arg` reads one argument of the type
   its spec spells; `Bendler.reply` writes the result back. The shim matches
   the index in `Bendler.step`, pulls the arguments, calls the user's def and
-  replies. Every value crosses as a Base type the runtime lays out itself, so
-  the C side never builds a user constructor.
+  replies. Values cross using Base's canonical boxed types and the controlled
+  Bytes prelude; the C side does not infer arbitrary user-constructor layouts.
   """
 
   alias Bendler.Sig
@@ -93,6 +93,9 @@ defmodule Bendler.Gen do
 
   defp has_bytes?(:bytes), do: true
   defp has_bytes?({:list, t}), do: has_bytes?(t)
+  defp has_bytes?({:tuple, ts}), do: Enum.any?(ts, &has_bytes?/1)
+  defp has_bytes?({:maybe, t}), do: has_bytes?(t)
+  defp has_bytes?({:result, e, t}), do: has_bytes?(e) or has_bytes?(t)
   defp has_bytes?(_), do: false
 
   @doc "The per-module C header naming each export's argument and result specs."

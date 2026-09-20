@@ -34,6 +34,7 @@ defmodule Bendler.MixProject do
 
   defp deps do
     [
+      {:nimble_csv, "== 1.3.0", only: :test, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
@@ -44,7 +45,7 @@ defmodule Bendler.MixProject do
     [
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url, "Bend" => "https://bend-lang.org"},
-      files: ~w(lib priv/c mix.exs README.md LICENSE docs)
+      files: ~w(lib priv/c priv/bend mix.exs README.md LICENSE docs)
     ]
   end
 
@@ -58,6 +59,7 @@ defmodule Bendler.MixProject do
         "docs/REVIEW.md",
         "docs/VALIDATION.md",
         "docs/BEAM_API.md",
+        "docs/TYPES.md",
         "docs/MVP.md"
       ]
     ]
