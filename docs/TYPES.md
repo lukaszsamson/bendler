@@ -118,8 +118,16 @@ type Tree is Data:
 | `Node{Leaf{1}, None{}, [], "n"}` | `{:node, {:leaf, 1}, :none, [], "n"}` |
 
 The constructor name is underscored (`MNode` is `:m_node`) and the
-generated module gets a `@type` per datatype. A one-element tuple is not a
-constructor: `{:dot}` raises, `:dot` is the value.
+generated module gets a `@type` per datatype, named after it in the same
+way (`Shape` is `shape/0`, `Geo.Vec` is `geo_vec/0`); a hand-written
+`@type` of that name in the module is a compile error, so use the
+generated one. A one-element tuple is not a constructor: `{:dot}` raises,
+`:dot` is the value.
+
+Bend's own kinds apply to the fields: a `type T is Data:` may only hold
+Data-kinded fields, which rules out tuples (`A & B` is Type-kinded) and
+Bytes; hold them in a `type T is Type:` or use a small record datatype
+instead of the tuple. A signature may span several lines.
 
 **How it crosses.** The compiler decides a constructor's memory layout
 (fields of non-recursive types are flattened into the parent node), so

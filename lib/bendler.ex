@@ -20,6 +20,8 @@ defmodule Bendler do
   `Maybe<T>` and `Result<E, T>` tagged tuples, `Map<V>` a map with binary
   keys, and a user `type` of the file a tagged tuple per constructor
   (`{:circle, r}`, or the atom `:dot` for a constructor without fields).
+  The module also gets a `@type` per datatype, named after it
+  (`Shape` is `shape/0`), so do not declare one of that name yourself.
 
   ## Options
 

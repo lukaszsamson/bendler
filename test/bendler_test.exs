@@ -21,14 +21,47 @@ defmodule BendlerTest do
     e in Bendler.Error -> e.reason
   end
 
+  test "an export that cannot cross names the reason" do
+    path = Path.join(System.tmp_dir!(), "bendler_skip_#{System.unique_integer([:positive])}.bend")
+    File.write!(path, "import Base\n\ndef bad(-x: U32) -> U32:\n  0\n\ndef main() -> U32:\n  0\n")
+
+    src = """
+    defmodule Bendler.Test.NoMain do
+      use Bendler, otp_app: :bendler, source: #{inspect(path)}, exports: [:bad, :main, :nope]
+    end
+    """
+
+    assert_raise Bendler.Error,
+                 ~r/bad: erased parameter x; main: main is the program, not an export; nope: no such def/,
+                 fn -> Code.compile_string(src) end
+  after
+    Path.wildcard(Path.join(System.tmp_dir!(), "bendler_skip_*.bend")) |> Enum.each(&File.rm/1)
+  end
+
   describe "Sig.parse/1" do
     test "reads the exportable defs and skips the rest" do
       {sigs, skipped, _} = Sig.parse(File.read!("bend/fib.bend"))
 
       assert Enum.map(sigs, & &1.name) ==
-               ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte.fin second_byte)
+               ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte.fin second_byte pack_bytes)
 
       assert Enum.find(sigs, &(&1.name == "rev_bytes")).ret == {:bytes, "B.Bytes"}
+      # a signature over several lines is read as one, at its first line
+      pack = Enum.find(sigs, &(&1.name == "pack_bytes"))
+      assert Enum.map(pack.params, & &1.name) == ["n", "xs"]
+      assert pack.ret == {:bytes, "B.Bytes"}
+
+      assert String.at(
+               File.read!("bend/fib.bend") |> String.split("\n") |> Enum.at(pack.line - 1),
+               0
+             ) == "d"
+
+      {[m], [], []} =
+        Sig.parse("def m(a: U32,\n      b: List<(U32 & String)>)\n  -> Maybe<U32>:\n  None{}\n")
+
+      assert {m.line, Enum.map(m.params, & &1.type), m.ret} ==
+               {1, [:u32, {:list, {:tuple, [:u32, :string]}}], {{:maybe, :u32}, "Maybe<U32>"}}
+
       assert skipped == []
 
       assert [%{type: {:tuple, [:bytes, :u32]}}] =
@@ -54,14 +87,14 @@ defmodule BendlerTest do
                  name: "lists",
                  params: [%{type: {:list, {:list, :string}}}],
                  ret: {{:list, :u32}, "+List<U32>"}
-               }
+               },
+               %Sig{name: "multi", params: [%{name: "x", type: :u32}], line: 9}
              ] = sigs
 
       assert [
                {"id", "erased parameter A"},
                {"main", _},
-               {"ok", "unsupported type IO(U32)"},
-               {"multi", _}
+               {"ok", "unsupported type IO(U32)"}
              ] = skipped
 
       assert_raise Bendler.Error, ~r/would all become a_b/, fn ->
@@ -133,6 +166,13 @@ defmodule BendlerTest do
       assert FibNif.byte_sum(<<1, 2, 3, 250>>) == 256
       assert FibNif.rev_bytes("hello") == "olleh"
       assert FibNif.rev_bytes("") == ""
+      assert FibNif.pack_bytes(3, [1, 2, 3]) == <<1, 2, 3>>
+      assert FibNif.pack_bytes(2, [9, 8, 7]) == <<9, 8>>
+      assert FibNif.pack_bytes(0, []) == <<>>
+
+      assert FibNif.pack_bytes(4000, Enum.to_list(0..3999) |> Enum.map(&rem(&1, 256))) ==
+               :binary.list_to_bin(Enum.map(0..3999, &rem(&1, 256)))
+
       assert FibNif.second_byte(<<9, 42, 7>>) == 42
       big = :crypto.strong_rand_bytes(100_000)
       assert FibNif.rev_bytes(big) == :binary.list_to_bin(Enum.reverse(:binary.bin_to_list(big)))

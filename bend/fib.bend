@@ -68,3 +68,10 @@ def second_byte.fin(r: B.Bytes & U32) -> U32:
 
 def second_byte(b: B.Bytes) -> U32:
   second_byte.fin(B.Bytes.at(b, 1))
+
+# a multi-line signature and Bytes.from_list_n
+def pack_bytes(
+  n: U32,
+  xs: List<U32>
+) -> B.Bytes:
+  B.Bytes.from_list_n(n, xs)

@@ -84,6 +84,7 @@ defmodule Bendler.Sig do
       source
       |> String.split("\n")
       |> Enum.map(&(&1 |> strip_comment() |> String.trim_trailing()))
+      |> join_signatures()
 
     {types, bad_types} = types(lines)
     ctx = %{types: Map.new(types, &{&1.name, &1}), bad: bad_types}
@@ -103,6 +104,56 @@ defmodule Bendler.Sig do
   end
 
   @def_head_re ~r/^(?:@unsafe\s+)?def\s+([A-Za-z_][\w.]*)\(/
+
+  # A signature may span lines: a def head whose parentheses or brackets are
+  # still open, or that has no trailing colon yet, continues on the next
+  # lines. They are joined into the first line (the others become blank, so
+  # line numbers hold).
+  defp join_signatures(lines) do
+    lines
+    |> Enum.reduce({[], nil}, fn line, {acc, open} -> join_line(line, acc, open) end)
+    |> then(fn
+      {acc, nil} -> acc
+      {acc, open} -> put_head(acc, open)
+    end)
+    |> Enum.reverse()
+  end
+
+  # `acc` holds the lines seen so far, latest first, with a :head marker
+  # where a signature being joined started; `open` is that signature so far
+  defp join_line(line, acc, nil) do
+    if Regex.match?(@def_head_re, line) and signature_open?(line),
+      do: {[:head | acc], line},
+      else: {[line | acc], nil}
+  end
+
+  defp join_line(line, acc, open) do
+    joined = open <> " " <> String.trim(line)
+
+    if signature_open?(joined),
+      do: {["" | acc], joined},
+      else: {put_head(["" | acc], joined), nil}
+  end
+
+  # the joined signature takes the place of its head marker
+  defp put_head(acc, joined) do
+    {blanks, [:head | rest]} = Enum.split_while(acc, &(&1 == ""))
+    blanks ++ [joined | rest]
+  end
+
+  defp signature_open?(line) do
+    depth =
+      line
+      |> String.replace("->", " ")
+      |> String.graphemes()
+      |> Enum.reduce(0, fn
+        c, d when c in ["(", "<", "["] -> d + 1
+        c, d when c in [")", ">", "]"] -> d - 1
+        _, d -> d
+      end)
+
+    depth > 0 or not String.ends_with?(line, ":")
+  end
 
   # One line: a readable def signature, an unreadable def head, or neither.
   defp classify(line, no, ctx) do

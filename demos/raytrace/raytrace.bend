@@ -639,7 +639,9 @@ def render_tiles.go(tiles: List<(U32 & U32 & U32 & U32)>, +scene: Scene, +w: U32
       a <> b
 
 # every tile of `tiles` (x0, y0, tw, th), rendered in parallel
-def render_tiles(+scene: Scene, +w: U32, +h: U32, tiles: List<(U32 & U32 & U32 & U32)>) -> List<B.Bytes>:
+def render_tiles(
+  +scene: Scene, +w: U32, +h: U32, tiles: List<(U32 & U32 & U32 & U32)>
+) -> List<B.Bytes>:
   render_tiles.go(tiles, scene, w, h)
 
 def render_checked.go(ok: Bool, scene: Scene, +w: U32, +h: U32, +x0: U32, +y0: U32,
@@ -652,7 +654,9 @@ def render_checked.go(ok: Bool, scene: Scene, +w: U32, +h: U32, +x0: U32, +y0: U
 
 # `render_tile` with the tile checked against the image: a `Fail` is
 # ordinary return data, so Elixir gets `{:error, message}`
-def render_checked(scene: Scene, +w: U32, +h: U32, +x0: U32, +y0: U32, +tw: U32, +th: U32) -> Result<String, B.Bytes>:
+def render_checked(
+  scene: Scene, +w: U32, +h: U32, +x0: U32, +y0: U32, +tw: U32, +th: U32
+) -> Result<String, B.Bytes>:
   render_checked.go(
     Bool.and(Bool.and(Bool.not(U32.is_zero(tw)), Bool.not(U32.is_zero(th))),
       Bool.and(U32.is_le(U32.add(x0, tw), w), U32.is_le(U32.add(y0, th), h))),

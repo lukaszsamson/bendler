@@ -80,7 +80,12 @@ static void bl_frame_reply(BlBuf* b) {
   const u8* p = b->p; u64 left = b->len;
   while (left > 0) {
     ssize_t r = write(1, p, left);
-    if (r < 0) { if (errno == EINTR) continue; fprintf(stderr, "bendler: stdout write failed\n"); exit(74); }
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      // the host closed the pipe (a deadline, a shutdown): leave quietly
+      if (errno != EPIPE) fprintf(stderr, "bendler: stdout write failed\n");
+      exit(74);
+    }
     p += r; left -= (u64)r;
   }
 }

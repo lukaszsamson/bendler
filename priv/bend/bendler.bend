@@ -86,6 +86,20 @@ def Bytes.from_list(xs: List<U32>) -> Bytes:
   +n = U32.from_nat(List.length(&2, U32, ys))
   Bytes.from_list.fin(Bytes.fill(ys, (Array.new(U32, Bytes.depth(n), 0), 0)))
 
+# a byte string of a known length from an affine list of bytes, in one
+# pass (from_list walks the list three times to learn the length); bytes
+# past n are dropped, a short list leaves zeros
+def Bytes.fill1(xs: List<U32>, st: Array<U32> & U32) -> Array<U32> & U32:
+  match xs:
+    case Nil{}:
+      st
+    case Con{x, t}:
+      (buf, +i) = st
+      Bytes.fill1(t, (Array.set(U32, buf, i, x), (i + 1 : U32)))
+
+def Bytes.from_list_n(+n: U32, xs: List<U32>) -> Bytes:
+  Bytes.from_list.fin(Bytes.fill1(List.take(&1, U32, xs, U32.to_nat(n)), (Array.new(U32, Bytes.depth(n), 0), 0)))
+
 # Dyn
 # ===
 

@@ -75,7 +75,7 @@ defmodule Bendler.Build do
   defp exports!(%{module: module, source: source} = opts) do
     src = File.read!(source)
     {sigs, skipped, types} = Sig.parse(src)
-    sigs = filter(sigs, opts[:exports], module)
+    sigs = filter(sigs, opts[:exports], module, skipped)
 
     for {n, why} <- skipped, opts[:exports] == nil or n in opts[:exports] do
       Logger.debug("bendler: #{inspect(module)} does not export #{n}: #{why}")
@@ -210,20 +210,25 @@ defmodule Bendler.Build do
     end)
   end
 
-  defp filter(sigs, nil, _), do: sigs
+  defp filter(sigs, nil, _, _), do: sigs
 
-  defp filter(sigs, names, module) do
+  defp filter(sigs, names, module, skipped) do
     names = Enum.map(names, &to_string/1)
     missing = names -- Enum.map(sigs, & &1.name)
-
-    if missing != [],
-      do:
-        raise(
-          Bendler.Error,
-          "#{inspect(module)} exports #{inspect(missing)}, which are not exportable defs"
-        )
-
+    if missing != [], do: raise(Bendler.Error, cannot_export(module, missing, skipped))
     Enum.filter(sigs, &(&1.name in names))
+  end
+
+  defp cannot_export(module, missing, skipped) do
+    why =
+      Enum.map_join(missing, "; ", fn name ->
+        case List.keyfind(skipped, name, 0) do
+          {_, reason} -> "#{name}: #{reason}"
+          nil -> "#{name}: no such def"
+        end
+      end)
+
+    "#{inspect(module)} cannot export #{why}"
   end
 
   # The fingerprint covers everything the artifact depends on: the sources
