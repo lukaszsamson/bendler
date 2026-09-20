@@ -22,8 +22,8 @@ Use parentheses around product arguments in generics, for example
 `Result<(U32 & Nat & String), (List<List<B.Bytes>> & Nat)>`.
 Unparenthesized product chains map to flat Elixir tuples, although Bend's
 underlying Tuple nodes are right-associated. Explicit parentheses retain
-nested Elixir tuple shape. Tuples have 2–16 fields and composite nesting is
-limited to 32 levels. Kind-qualified spellings such as `List<&2, U32>` and
+nested Elixir tuple shape. Tuples have 2–16 fields and type-expression nesting is
+limited to 32 levels (runtime values may nest up to 2048 levels). Kind-qualified spellings such as `List<&2, U32>` and
 `Result<&2, &2, U32, String>` are accepted by the signature reader. Existing
 single-line signature and unsupported-user-datatype restrictions remain.
 
@@ -89,7 +89,9 @@ binders want `Map<&2, V>`). Building the trie is `O(n log n)` string
 comparisons in Bend, which is the cost of not knowing the layout. Because
 the conversion wraps the whole call, a Map must be a whole parameter or
 result; `List<Map<U32>>` or `Map<U32> & U32` keep a def out. Keys are
-binaries; an Elixir map with other keys raises `ArgumentError` on encode.
+valid UTF-8 binaries; other keys, including invalid UTF-8 binaries, raise
+`ArgumentError` before dispatch. Unlike ordinary String values, keys must not
+undergo lossy replacement, since distinct keys could collapse into one entry.
 The Elixir side receives the pair list and builds the map in `check/3`;
 duplicates cannot occur because the trie has none.
 
@@ -139,6 +141,8 @@ validation excludes) yields the type's first finite constructor.
 
 **Rules**, each reported as the reason a def is skipped:
 
+- 1–255 constructors per type, and 0–255 fields per constructor; the codec
+  also rejects oversized caller-supplied tables rather than truncating bytes;
 - no type parameters, no erased (`-`) fields, no `Map` field, and a
   `Map<V>` parameter's `V` holds no datatype;
 - a type may hold itself only as a whole field `T`, `List<T>` or

@@ -102,6 +102,13 @@ that cost, but this benchmark does not establish it.
 
 ## Safety checks
 
+Current status after the user-datatype extension: the expanded ASan harness
+faults in generated runtime `root_done` before reaching its new Dyn tests
+(at both O1 and O3). See `docs/VALIDATION.md` in the repository root. The
+earlier successful codec run below is historical, not a passing result for
+the current fixture. The command remains a failing reproducer; no sanitizer
+finding is suppressed.
+
 Tests compare fixed cases, all 781 strings of length 0–4 over quote/comma/CR/LF/a,
 and 40 deterministic generated tables against
 NimbleCSV, including invalid UTF-8 and embedded newlines. Composite tests

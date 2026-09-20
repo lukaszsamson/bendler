@@ -113,7 +113,8 @@ defmodule Bendler.Build do
 
     stamp_file = Path.join(build_dir, "stamp")
 
-    if not build_opts[:force] and File.exists?(artifact) and File.read(stamp_file) == {:ok, stamp} do
+    if not Keyword.get(build_opts, :force, false) and File.exists?(artifact) and
+         File.read(stamp_file) == {:ok, stamp} do
       {sigs, types, artifact}
     else
       Logger.info("bendler: building #{inspect(module)} (#{backend}) from #{source}")

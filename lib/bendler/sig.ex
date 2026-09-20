@@ -268,6 +268,7 @@ defmodule Bendler.Sig do
     ctx = %{types: names, bad: %{}}
 
     with {:ok, ctors} <- map_ok(t.raw_ctors, &parse_ctor(&1, ctx)),
+         :ok <- count_limit(ctors, 1, "constructors"),
          :ok <- distinct_atoms(ctors) do
       {:ok, %{name: t.name, kind: t.kind, ctors: ctors, line: t.line}}
     end
@@ -278,7 +279,8 @@ defmodule Bendler.Sig do
       [_, name, fields] ->
         fields = fields |> split_top() |> Enum.reject(&(String.trim(&1) == ""))
 
-        with {:ok, fields} <- map_ok(fields, &parse_field(&1, ctx)) do
+        with :ok <- count_limit(fields, 0, "constructor fields"),
+             {:ok, fields} <- map_ok(fields, &parse_field(&1, ctx)) do
           {:ok, %{name: name, atom: ctor_atom(name), fields: fields}}
         end
 
@@ -305,6 +307,12 @@ defmodule Bendler.Sig do
   end
 
   defp ctor_atom(name), do: name |> Macro.underscore() |> String.to_atom()
+
+  defp count_limit(items, minimum, label) do
+    if length(items) in minimum..255,
+      do: :ok,
+      else: {:error, "expected #{minimum}..255 #{label}"}
+  end
 
   defp distinct_atoms(ctors) do
     case ctors |> Enum.group_by(& &1.atom) |> Enum.find(fn {_, cs} -> length(cs) > 1 end) do

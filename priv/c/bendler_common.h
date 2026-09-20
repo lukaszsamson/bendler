@@ -173,7 +173,8 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       c->p += 1; return;
     case 't': if (tag != BL_UNIT) c->err = "expected a Unit"; return;
     case 'y': {
-#ifndef BENDLER_CID_BYTES
+// A datatype field uses Dyn.DB, even when no export uses canonical Bytes.
+#if !defined(BENDLER_CID_BYTES) && !defined(BENDLER_CID_DB)
       c->err = "this program has no Bytes type"; return;
 #endif
       if (tag != BL_BYTES || c->end - c->p < 4) { c->err = "expected Bytes"; return; }

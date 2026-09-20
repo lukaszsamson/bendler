@@ -98,7 +98,7 @@ override the module's. Put it under a supervisor before calling it.
 | `Result<E, T>` | `{:error, error}` or `{:ok, value}` |
 | `F32` | float, rounded to single precision; `:nan`, `:infinity`, `:neg_infinity` for the values the BEAM has no float for |
 | `Char` | integer code point (`0..0x10FFFF`, no surrogates) |
-| `Map<V>` (also `Map<&2, V>`), a whole parameter or result | map with binary keys |
+| `Map<V>` (also `Map<&2, V>`), a whole parameter or result | map with valid UTF-8 binary keys |
 | `type T is Data:` of the same file | `{:ctor, field, ...}` per constructor, `:ctor` without fields |
 
 These types compose recursively, including bytes inside tuples and variants;

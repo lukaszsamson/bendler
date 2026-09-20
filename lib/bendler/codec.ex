@@ -13,13 +13,13 @@ defmodule Bendler.Codec do
       15 Data (constructor8, count8, then fields)
 
   A Result's Fail is returned as `{:error, value}`; only tag 0 raises a
-  transport error. Composite values may nest up to 32 levels.
+  transport error. Type expressions may nest up to 32 levels; values up to 2048.
 
   An `F32` takes an Elixir float, rounded to the nearest single; a float
   past the single range raises `ArgumentError`. The atoms `:nan`,
   `:infinity` and `:neg_infinity` cross both ways, since the BEAM has no
   such floats. A `Char` is a code point, 0..0x10FFFF without surrogates.
-  A `Map<V>` is an Elixir map with binary keys; on the wire it is a list of
+  A `Map<V>` is an Elixir map with valid UTF-8 binary keys; on the wire it is a list of
   `String & V` pairs. A user datatype is a tagged tuple, `{:circle, r}`, or
   the bare atom of a constructor without fields; the wire form names the
   constructor by index, so encoding and checking take the `types` table
@@ -63,8 +63,12 @@ defmodule Bendler.Codec do
   def encode(v, :char, _) when is_integer(v) and v in 0..0x10FFFF and v not in 0xD800..0xDFFF,
     do: <<14, v::32>>
 
-  def encode(v, {:map, t}, types) when is_map(v),
-    do: encode(Map.to_list(v), {:list, {:tuple, [:string, t]}}, types)
+  def encode(v, {:map, t}, types) when is_map(v) do
+    unless Enum.all?(Map.keys(v), &(is_binary(&1) and String.valid?(&1))),
+      do: raise(ArgumentError, "Map keys must be valid UTF-8 strings")
+
+    encode(Map.to_list(v), {:list, {:tuple, [:string, t]}}, types)
+  end
 
   def encode(v, {:list, t}, types) when is_list(v),
     do: <<6, length(v)::32>> <> Enum.map_join(v, &encode(&1, t, types))
@@ -82,6 +86,13 @@ defmodule Bendler.Codec do
       when is_atom(v) or (is_tuple(v) and tuple_size(v) > 1) do
     {tag, fields} = if is_atom(v), do: {v, []}, else: List.pop_at(Tuple.to_list(v), 0)
     ctors = Map.get(types, name, [])
+
+    unless length(ctors) in 1..255 and Enum.all?(ctors, fn {_, fs} -> length(fs) <= 255 end),
+      do:
+        raise(
+          ArgumentError,
+          "datatype #{name} requires 1..255 constructors with at most 255 fields each"
+        )
 
     case Enum.find(ctors, fn {a, _} -> a == tag end) do
       {_, fts} when length(fts) == length(fields) ->

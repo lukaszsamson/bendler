@@ -191,3 +191,26 @@ The ThumbHash demo's `Px`, `Pos` and `Ch` types became exportable without
 a change to the demo. Measured through the port: a 4093-node tree in
 1.6 ms, round trip 3.6 ms; a 2000-cell linked list 2.7 ms in, 1.1 ms
 out; 10,000 three-field records 5.3 ms.
+
+## Track 3 review fixes (2026-09-20)
+
+The full suite now passes 80 tests. New regressions cover 255/256/257
+constructors and fields, defensive rejection of oversized codec tables,
+valid UTF-8 map keys, Bytes inside a datatype with no unrelated Bytes
+export (separate Port and NIF modules), and omitted build options on the
+fresh/cache paths. Native Bytes validation accepts the Dyn.DB path without
+requiring the canonical Bytes constructor. No user constructor layout is
+introduced into C. Strict Credo and Dialyzer pass.
+
+The ASan harness now defines every Dyn constructor macro and exercises
+records with Bytes/F32/Result, 300-deep recursive values and malformed
+constructor frames. **The expanded current fixture is not ASan-clean:**
+the executable faults during its first Base-composite call, before the Dyn
+cases, in generated `root_done` / `corpus_eval` / `io_step`. ASan reports a
+near-null read at `shim.c:1541`. Reproduced with both O1 and O3; the harness
+retains O1. `handle_segv=2` exposes the ASan diagnostic instead of Bend's
+generic “machine stack overflow?” signal message. This supersedes any
+assumption that the earlier successful ASan run validates the current
+fixture. No generated-runtime patch or sanitizer suppression was applied.
+ASan coverage of Dyn remains blocked pending investigation; normal native
+Port/NIF regressions pass. Leak detection remains disabled.
