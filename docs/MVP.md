@@ -112,10 +112,25 @@ small interface, and where Bend's parallelism can show. In order:
    compatibility. Differential tests against the Elixir implementation.
 2. **Murmur3 x86_32**, against the archived `murmur` package. Bytes in,
    U32 out, wrapping arithmetic and endianness. Needs the bytes type; it is
-   the forcing function for it.
+   the forcing function for it. (done: `bend/murmur.bend` takes bytes as
+   `List<U32>` — the interim convention, no codec change — with a
+   parallel `batch_murmur3/2`; `test/murmur_test.exs` reuses every
+   x86_32 known answer and boundary vector plus differential fuzz;
+   `bench/murmur_bench.exs` shows hand-off-dominated singles and the
+   list-transfer cost that the track-3 bytes row must remove.)
 3. **ThumbHash encoding**, against `thumbhash-ex`: keep image IO in
-   Elixir, port the RGBA computation. Exercises buffers and F32 precision,
-   so it comes after binary and array support.
+   Elixir, port the RGBA computation. (done: `demos/thumbhash/`, bytes as
+   `List<U32>` both ways, floats inside Bend as `F32`. Differential tests
+   against a verbatim copy of the reference found two bugs in the
+   reference itself: the alpha channel is encoded without `w`/`h` and
+   crashes on any transparent image, and operator precedence puts both
+   flag bits in bit 0 instead of bits 15 and 23; the copy fixes both. F32
+   against doubles: most hashes exact, the rest one quantisation step off
+   where a coefficient sits on a rounding tie, so a precision policy or
+   `F64` is the ask. Speed: 100x100 in 10 ms through the port against
+   45 ms for the Elixir reference; a batch of 32 small images loses to
+   `Task.async_stream` (16 ms vs 11 ms) because 130 KB of pixels cross as
+   list cells each way, the same list-transfer cost Murmur3 measured.)
 4. **A parallel numeric kernel** from Bend's own `bench/runtime/` (nbody,
    mandelbrot, k-means) exposed to Elixir and compared with `Nx` on the
    CPU. This is the "why would I do this" demo.

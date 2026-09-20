@@ -10,6 +10,7 @@ defmodule Bendler.MixProject do
       version: @version,
       elixir: "~> 1.16",
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_paths: ["test"] ++ Path.wildcard("demos/*/test"),
       compilers: Mix.compilers() ++ [:bendler],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -24,7 +25,7 @@ defmodule Bendler.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:test), do: ["lib", "test/support"] ++ Path.wildcard("demos/*/lib")
   defp elixirc_paths(_), do: ["lib"]
 
   def application do

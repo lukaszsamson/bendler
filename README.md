@@ -202,6 +202,7 @@ lib/mix/tasks/          mix compile.bendler and mix bendler.clean
 priv/c/                 the foreign effects and the two transports
 bend/fib.bend           the example module
 test/support/           Bendler.Examples.FibNif and FibPort, and the crash and admission fixtures
+demos/<name>/           a real port each (Bend source, port module, reference, tests, bench)
 test/                   the suite (mix test)
 docs/RESEARCH.md        findings, alternatives, roadmap
 docs/REVIEW.md          what independent review found, and what changed
