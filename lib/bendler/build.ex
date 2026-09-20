@@ -100,7 +100,9 @@ defmodule Bendler.Build do
 
     artifact = Path.join(out_dir, if(backend == :nif, do: name <> ".so", else: name))
     rel = Path.relative_to(Path.expand(source), build_dir, force: true) |> relativize()
-    shim = Gen.shim(rel, sigs)
+    prelude = if Gen.uses_bytes?(sigs), do: prelude!(source, build_dir)
+    shim = Gen.shim(rel, sigs, prelude)
+    bytes_flag = fn c -> if prelude, do: ["-DBENDLER_CID_BYTES=" <> bytes_cid!(c)], else: [] end
     specs = Gen.specs_h(sigs)
     c_sources = Enum.map(@c_files, &File.read!(Path.join(c_dir(), &1)))
 
@@ -130,31 +132,65 @@ defmodule Bendler.Build do
       # replaces the artifact a running system may still be loading
       staged = artifact <> ".building." <> Integer.to_string(System.unique_integer([:positive]))
 
-      case backend do
-        :port ->
-          run!(
-            cc(),
-            ~w(-std=c11 -O3 -I. -DBENDLER_TRANSPORT="bendler_port.h" shim.c -o) ++
-              [staged, "-lpthread", "-lm"],
-            build_dir
-          )
-
-        :nif ->
-          File.write!(Path.join(build_dir, "shim_nif.c"), Gen.host_in_beam!(File.read!(c_path)))
-          File.write!(Path.join(build_dir, "bendler_nif_glue.c"), glue)
-
-          run!(
-            cc(),
-            ~w(-std=c11 -O3 -shared -fPIC -I. -I#{erts_include()} -DBENDLER_TRANSPORT="bendler_nif.h") ++
-              platform_flags() ++
-              ["shim_nif.c", "bendler_nif_glue.c", "-o", staged, "-lpthread", "-lm"],
-            build_dir
-          )
-      end
+      compile!(backend, build_dir, c_path, staged, glue, bytes_flag.(c_path))
 
       File.rename!(staged, artifact)
       File.write!(stamp_file, stamp)
       {sigs, artifact}
+    end
+  end
+
+  # clang builds the emitted C into `staged`: an executable, or a shared
+  # library with the NIF glue and the C patched for the BEAM
+  defp compile!(:port, build_dir, _c_path, staged, _glue, bytes_flag) do
+    run!(
+      cc(),
+      ~w(-std=c11 -O3 -I. -DBENDLER_TRANSPORT="bendler_port.h") ++
+        bytes_flag ++ ["shim.c", "-o", staged, "-lpthread", "-lm"],
+      build_dir
+    )
+  end
+
+  defp compile!(:nif, build_dir, c_path, staged, glue, bytes_flag) do
+    File.write!(Path.join(build_dir, "shim_nif.c"), Gen.host_in_beam!(File.read!(c_path)))
+    File.write!(Path.join(build_dir, "bendler_nif_glue.c"), glue)
+
+    run!(
+      cc(),
+      ~w(-std=c11 -O3 -shared -fPIC -I. -I#{erts_include()} -DBENDLER_TRANSPORT="bendler_nif.h") ++
+        bytes_flag ++
+        platform_flags() ++
+        ["shim_nif.c", "bendler_nif_glue.c", "-o", staged, "-lpthread", "-lm"],
+      build_dir
+    )
+  end
+
+  # The prelude (priv/bend/bendler.bend) is written next to the source that
+  # uses Bytes, so `import ./bendler.bend as B` resolves; an outdated copy is
+  # replaced. Answers the shim's import path for it.
+  defp prelude!(source, build_dir) do
+    template =
+      File.read!(Path.join([to_string(:code.priv_dir(:bendler)), "bend", "bendler.bend"]))
+
+    path = Path.join(Path.dirname(source), "bendler.bend")
+
+    if File.read(path) != {:ok, template} do
+      Logger.info("bendler: writing the prelude to #{path}")
+      File.write!(path, template)
+    end
+
+    Path.relative_to(path, build_dir, force: true) |> relativize()
+  end
+
+  # The C name of the prelude's Bytes constructor, as the emitted source
+  # spells it (it depends on the import path), for the codec.
+  defp bytes_cid!(c_path) do
+    case Regex.run(~r/^#define (CID_\S*BENDLER_BYTES) \d+$/m, File.read!(c_path)) do
+      [_, macro] ->
+        macro
+
+      nil ->
+        raise Bendler.Error, "the emitted C has no Bytes constructor; is the prelude imported?"
     end
   end
 

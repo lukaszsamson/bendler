@@ -26,9 +26,10 @@ defmodule BendlerTest do
       {sigs, skipped} = Sig.parse(File.read!("bend/fib.bend"))
 
       assert Enum.map(sigs, & &1.name) ==
-               ~w(fib sum shout range is_big square pow2 words nest slow)
+               ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte)
 
-      assert skipped == []
+      assert Enum.find(sigs, &(&1.name == "rev_bytes")).ret == {:bytes, "B.Bytes"}
+      assert skipped == [{"second_byte.fin", "parameter r: unsupported type B.Bytes & U32"}]
 
       {sigs, skipped} =
         Sig.parse("""
@@ -125,6 +126,17 @@ defmodule BendlerTest do
       assert FibNif.words("a bb  ccc") == ["a", "bb", "", "ccc"]
     end
 
+    test "Bytes cross as binaries backed by a buffer block" do
+      assert FibNif.byte_sum(<<1, 2, 3, 250>>) == 256
+      assert FibNif.rev_bytes("hello") == "olleh"
+      assert FibNif.rev_bytes("") == ""
+      assert FibNif.second_byte(<<9, 42, 7>>) == 42
+      big = :crypto.strong_rand_bytes(100_000)
+      assert FibNif.rev_bytes(big) == :binary.list_to_bin(Enum.reverse(:binary.bin_to_list(big)))
+      assert FibNif.byte_sum(big) == Enum.sum(:binary.bin_to_list(big))
+      assert_raise ArgumentError, fn -> FibNif.byte_sum([1, 2]) end
+    end
+
     test "round-trips empty and nested lists through the native codec" do
       assert FibNif.nest([]) == []
       assert FibNif.nest([[], [1], [], [2, 3]]) == [[], [1], [], [2, 3]]
@@ -193,6 +205,7 @@ defmodule BendlerTest do
     end
 
     test "calls through the port" do
+      assert FibPort.rev_bytes(<<1, 2, 3>>) == <<3, 2, 1>>
       assert FibPort.fib(30, 0, 1) == 832_040
       assert FibPort.words("x y") == ["x", "y"]
       assert FibPort.range(5, [9]) == [0, 1, 2, 3, 4, 9]

@@ -7,7 +7,7 @@ behaviour, not a benchmark or a safety certification.
 
 ## Test suite
 
-`mix test`: **18 tests, 0 failures**, repeated runs with random seeds.
+`mix test`: **46 tests, 0 failures** (19 core, 27 across the three demos), repeated runs with random seeds.
 Coverage:
 
 1. Signature parsing: exportable defs, skipped ones with reasons, trailing
@@ -32,6 +32,19 @@ Coverage:
    reason text, before anything reaches the runtime.
 6. A NIF request posted but never picked up before its deadline is
    withdrawn, and the loop parks cleanly afterwards and serves again.
+
+## Bytes
+
+`B.Bytes` round-trips through both backends: sums, reversal and indexing
+on small binaries and on 100 KB of random bytes; a list where a binary is
+declared is refused on the Elixir side. Benchmarks (`demos/*/bench.exs`):
+
+| workload | List<U32> | Bytes | Elixir |
+|---|---|---|---|
+| Murmur3, 5 B | 11.8 µs | 8.9 µs | 0.1 µs |
+| Murmur3, 64 KB | 8.5 ms | 0.28 ms | 0.57 ms |
+| ThumbHash 100x100 | 10.8 ms | 5.8 ms | 26 ms |
+| ThumbHash 32x32, batch of 32 | 16 ms | 9 ms | 18 ms (`Task.async_stream`) |
 
 ## Static checks
 

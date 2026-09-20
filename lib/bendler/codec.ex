@@ -6,7 +6,7 @@ defmodule Bendler.Codec do
 
       0 error (len32 + message)  1 U32 (4 bytes)  2 Nat (8 bytes, < 2^48)
       3 String (len32)           4 Bool (1 byte)  5 Unit
-      6 List (count32, then the items)
+      6 List (count32, then the items)  7 Bytes (len32, raw bytes)
   """
 
   @nat_max Integer.pow(2, 48) - 1
@@ -27,6 +27,7 @@ defmodule Bendler.Codec do
   def encode(true, :bool), do: <<4, 1>>
   def encode(false, :bool), do: <<4, 0>>
   def encode(:unit, :unit), do: <<5>>
+  def encode(v, :bytes) when is_binary(v), do: <<7, byte_size(v)::32, v::binary>>
 
   def encode(v, {:list, t}) when is_list(v),
     do: <<6, length(v)::32>> <> Enum.map_join(v, &encode(&1, t))
@@ -65,6 +66,7 @@ defmodule Bendler.Codec do
   defp typed?(v, :string), do: is_binary(v)
   defp typed?(v, :bool), do: is_boolean(v)
   defp typed?(v, :unit), do: v == :unit
+  defp typed?(v, :bytes), do: is_binary(v)
   defp typed?(v, {:list, t}), do: is_list(v) and Enum.all?(v, &typed?(&1, t))
 
   @doc "Decodes one value, returning it beside the rest of the binary."
@@ -75,6 +77,7 @@ defmodule Bendler.Codec do
   def decode(<<3, n::32, s::binary-size(n), r::binary>>), do: {s, r}
   def decode(<<4, b, r::binary>>) when b in [0, 1], do: {b == 1, r}
   def decode(<<5, r::binary>>), do: {:unit, r}
+  def decode(<<7, n::32, s::binary-size(n), r::binary>>), do: {s, r}
 
   # every item takes at least a tag byte: a count past the binary is a lie
   def decode(<<6, n::32, r::binary>>) when n <= byte_size(r) do
@@ -88,6 +91,7 @@ defmodule Bendler.Codec do
   defp describe(:string), do: "String (a binary)"
   defp describe(:bool), do: "Bool"
   defp describe(:unit), do: "Unit (the atom :unit)"
+  defp describe(:bytes), do: "Bytes (a binary)"
   defp describe({:list, t}), do: "List of #{describe(t)}"
 end
 

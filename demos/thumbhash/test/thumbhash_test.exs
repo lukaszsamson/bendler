@@ -115,6 +115,11 @@ defmodule Bendler.Demos.ThumbhashTest do
     assert ThumbhashPort.thumbhash(101, 1, List.duplicate(0, 404)) == []
   end
 
+  test "the Bytes and list exports agree" do
+    rgba = image(12, 9, 21)
+    assert ThumbhashPort.thumbhash_bytes(12, 9, rgba) == ThumbhashPort.thumbhash(12, 9, :binary.bin_to_list(rgba))
+  end
+
   test "a batch encodes every image and agrees with single calls" do
     images = for seed <- 1..16, do: image(24, 16, seed)
     assert ThumbhashPort.encode_batch(24, 16, images) == Enum.map(images, &ThumbhashPort.encode(24, 16, &1))

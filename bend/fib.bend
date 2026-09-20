@@ -1,4 +1,5 @@
 import Base
+import ./bendler.bend as B
 
 def fib(n: Nat, a: U32, +b: U32) -> U32:
   match n:
@@ -46,3 +47,24 @@ def nest(xs: List<List<U32>>) -> List<List<U32>>:
 
 def slow(+n: Nat) -> U32:
   pow2(n)
+
+# Bytes: the prelude's type, an Elixir binary on the other side
+def byte_sum.go(xs: List<U32>, acc: U32) -> U32:
+  match xs:
+    case Nil{}:
+      acc
+    case Con{x, t}:
+      byte_sum.go(t, (acc + x : U32))
+
+def byte_sum(b: B.Bytes) -> U32:
+  byte_sum.go(B.Bytes.to_list(b), 0)
+
+def rev_bytes(b: B.Bytes) -> B.Bytes:
+  B.Bytes.from_list(List.reverse(&1, U32, B.Bytes.to_list(b)))
+
+def second_byte.fin(r: B.Bytes & U32) -> U32:
+  (b2, x) = r
+  x
+
+def second_byte(b: B.Bytes) -> U32:
+  second_byte.fin(B.Bytes.at(b, 1))

@@ -4,14 +4,15 @@ defmodule Bendler.Sig do
   of them can be exported to Elixir.
 
   A def is exportable when every parameter and its result are of a marshalled
-  type: `U32`, `Nat`, `String`, `Bool`, `Unit` and `List<T>` of those (also
-  written `+List<T>` or `List<&2, T>`). Erased (`-`) and template (`~`)
-  parameters, `IO` results and every other type keep a def out.
+  type: `U32`, `Nat`, `String`, `Bool`, `Unit`, `Bytes` (the prelude's
+  `B.Bytes`, an Elixir binary) and `List<T>` of those (also written
+  `+List<T>` or `List<&2, T>`). Erased (`-`) and template (`~`) parameters,
+  `IO` results and every other type keep a def out.
   """
 
   defstruct [:name, :params, :ret, :line]
 
-  @type type :: :u32 | :nat | :string | :bool | :unit | {:list, type}
+  @type type :: :u32 | :nat | :string | :bool | :unit | :bytes | {:list, type}
   @type param :: %{name: String.t(), type: type, text: String.t(), reusable: boolean}
   @type t :: %__MODULE__{
           name: String.t(),
@@ -144,9 +145,12 @@ defmodule Bendler.Sig do
   def parse_type(text) do
     case String.trim(text) do
       "+" <> rest -> parse_type(rest)
-      other -> word_or_list(Map.get(@word_types, other), other)
+      other -> word_or_list(Map.get(@word_types, other) || bytes_type(other), other)
     end
   end
+
+  # the prelude's Bytes, under whatever alias the file imported it
+  defp bytes_type(text), do: if(Regex.match?(~r/^(?:\w+\.)?Bytes$/, text), do: :bytes)
 
   defp word_or_list(nil, text), do: list_type(text)
   defp word_or_list(type, _text), do: {:ok, type}
@@ -165,6 +169,7 @@ defmodule Bendler.Sig do
   def spec(:string), do: "s"
   def spec(:bool), do: "b"
   def spec(:unit), do: "t"
+  def spec(:bytes), do: "y"
   def spec({:list, t}), do: "L" <> spec(t)
 
   @doc "The Elixir typespec of a marshalled type."
@@ -173,5 +178,6 @@ defmodule Bendler.Sig do
   def typespec(:string), do: quote(do: String.t())
   def typespec(:bool), do: quote(do: boolean())
   def typespec(:unit), do: quote(do: :unit)
+  def typespec(:bytes), do: quote(do: binary())
   def typespec({:list, t}), do: quote(do: [unquote(typespec(t))])
 end

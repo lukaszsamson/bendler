@@ -1,4 +1,5 @@
 import Base
+import ./bendler.bend as B
 
 # ThumbHash encoding (Evan Wallace's algorithm), ported from
 # `Hentioe/thumbhash-ex`: an RGBA image of at most 100x100 pixels
@@ -391,4 +392,16 @@ def batch_thumbhash(+w: U32, +h: U32, images: List<List<U32>>) -> List<List<U32>
       Nil{}
     case Con{img, rest}:
       hd tl = thumbhash(w, h, img) batch_thumbhash(w, h, rest)
+      hd <> tl
+
+# the same, with the pixels crossing as one Bytes buffer
+def thumbhash_bytes(+w: U32, +h: U32, rgba: B.Bytes) -> List<U32>:
+  thumbhash(w, h, B.Bytes.to_list(rgba))
+
+def batch_thumbhash_bytes(+w: U32, +h: U32, images: List<B.Bytes>) -> List<List<U32>>:
+  match images:
+    case Nil{}:
+      Nil{}
+    case Con{img, rest}:
+      hd tl = thumbhash_bytes(w, h, img) batch_thumbhash_bytes(w, h, rest)
       hd <> tl

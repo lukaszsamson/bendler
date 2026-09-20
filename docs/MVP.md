@@ -67,7 +67,7 @@ ignorant of user constructors.
 
 | add | Bend | Elixir | notes |
 |---|---|---|---|
-| [ ] bytes | `Array<U32>` or a bytes list | binary | distinct from `String` (code points); needed by Murmur3, then compression and wire formats |
+| [x] bytes (done) | `B.Bytes{len, buf: Array<U32>}` from the prelude | binary | one buffer block each way; Murmur3 on 64 KB went from 8.5 ms to 0.28 ms, ThumbHash 100x100 from 10.8 ms to 5.8 ms |
 | [ ] tuples | `A & B` | `{a, b}` | `CID_TUPLE` node |
 | [ ] `Maybe`, `Result` | `Maybe<..>`, `Result<..>` | tagged: `{:some, v} \| :none`, `{:ok, v} \| {:error, {code, msg}}` | tagged, not `nil \| v`, so nested options stay unambiguous |
 | [ ] `F32` | `F32` | float | explicit conversion, range and non-finite policies; then ThumbHash |
@@ -122,7 +122,9 @@ small interface, and where Bend's parallelism can show. In order:
    parallel `batch_murmur3/2`; `demos/murmur3/test/murmur_test.exs` reuses every
    x86_32 known answer and boundary vector plus differential fuzz;
    `demos/murmur3/bench.exs` shows hand-off-dominated singles and the
-   list-transfer cost that the track-3 bytes row must remove.)
+   list-transfer cost that the track-3 bytes row must remove. Bytes added
+   since: `murmur3/2` over `B.Bytes` hashes 64 KB in 0.28 ms against
+   8.5 ms as a list and 0.57 ms in Elixir.)
 3. **ThumbHash encoding**, against `thumbhash-ex`: keep image IO in
    Elixir, port the RGBA computation. (done: `demos/thumbhash/`, bytes as
    `List<U32>` both ways, floats inside Bend as `F32`. Differential tests
@@ -135,7 +137,9 @@ small interface, and where Bend's parallelism can show. In order:
    `F64` is the ask. Speed: 100x100 in 10 ms through the port against
    45 ms for the Elixir reference; a batch of 32 small images loses to
    `Task.async_stream` (16 ms vs 11 ms) because 130 KB of pixels cross as
-   list cells each way, the same list-transfer cost Murmur3 measured.)
+   list cells each way, the same list-transfer cost Murmur3 measured. With
+   the pixels as `B.Bytes`: 100x100 in 5.8 ms, and the batch of 32 in
+   9 ms against 18 ms for `Task.async_stream`.)
 4. **A parallel numeric kernel** from Bend's own `bench/runtime/` (nbody,
    mandelbrot, k-means) exposed to Elixir and compared with `Nx` on the
    CPU. This is the "why would I do this" demo.

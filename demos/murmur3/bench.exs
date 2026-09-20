@@ -63,3 +63,13 @@ measure_batch.("short", List.duplicate(short, 64), 0, 20)
 measure_batch.("medium", List.duplicate(medium, 64), 0, 20)
 measure_batch.("medium", Enum.map(0..63, fn i -> "input-#{i}-#{medium}" end), 0, 10)
 measure_batch.("1KB", List.duplicate(kb1, 16), 0, 5)
+
+IO.puts("")
+IO.puts("--- Bytes instead of List<U32> (the same hash, a buffer block each way)")
+for {label, bin} <- [{"5 B", "abcde"}, {"64 B", :crypto.strong_rand_bytes(64)}, {"64 KB", :crypto.strong_rand_bytes(65_536)}] do
+  MurmurPort.hash(bin, 0)
+  ops = if byte_size(bin) > 1000, do: 20, else: 2000
+  {lus, _} = :timer.tc(fn -> Enum.each(1..ops, fn _ -> MurmurPort.murmur3_x86_32(:binary.bin_to_list(bin), 0) end) end)
+  {bus, _} = :timer.tc(fn -> Enum.each(1..ops, fn _ -> MurmurPort.hash(bin, 0) end) end)
+  IO.puts("#{label}: list #{Float.round(lus / ops, 1)} µs, bytes #{Float.round(bus / ops, 1)} µs per hash")
+end

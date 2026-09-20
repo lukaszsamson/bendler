@@ -11,18 +11,22 @@ defmodule Bendler.Gen do
 
   alias Bendler.Sig
 
-  @doc "The shim source for the exports of the module at `import_path`."
-  @spec shim(String.t(), [Sig.t()]) :: String.t()
-  def shim(import_path, sigs) do
+  @prelude_alias "BendlerPrelude"
+
+  @doc "The shim source for the exports of the module at `import_path`; `prelude_path` is the prelude's, or nil."
+  @spec shim(String.t(), [Sig.t()], String.t() | nil) :: String.t()
+  def shim(import_path, sigs, prelude_path \\ nil) do
     arms =
       sigs
       |> Enum.with_index()
       |> Enum.map_join("\n", fn {sig, i} -> arm(sig, i) end)
 
+    prelude = if prelude_path, do: "import #{prelude_path} as #{@prelude_alias}\n", else: ""
+
     """
     import Base
     import #{import_path} as M
-
+    #{prelude}
     def Bendler.fn() -> IO(U32):
       import "./bendler_fn.c"
       import "./bendler_fn.js"
@@ -60,8 +64,9 @@ defmodule Bendler.Gen do
     binds =
       Enum.map_join(params, "\n", fn p ->
         q = if p.reusable, do: "+", else: ""
+        t = shim_type(p.text)
 
-        "        #{q}#{p.name} : #{p.text} <- Bendler.arg(#{p.text}, #{inspect(Sig.spec(p.type))})"
+        "        #{q}#{p.name} : #{t} <- Bendler.arg(#{t}, #{inspect(Sig.spec(p.type))})"
       end)
 
     args = Enum.map_join(params, ", ", & &1.name)
@@ -70,9 +75,25 @@ defmodule Bendler.Gen do
         case #{i}:
           do IO<Unit>:
     #{binds}
-            Bendler.reply(#{ret_text}, #{inspect(Sig.spec(ret_t))}, M.#{name}(#{args}))\
+            Bendler.reply(#{shim_type(ret_text)}, #{inspect(Sig.spec(ret_t))}, M.#{name}(#{args}))\
     """
   end
+
+  # the user's alias for the prelude's Bytes becomes the shim's
+  defp shim_type(text),
+    do: Regex.replace(~r/\b(?:\w+\.)?Bytes\b/, text, "#{@prelude_alias}.Bytes")
+
+  @doc "Whether any export carries the prelude's Bytes."
+  @spec uses_bytes?([Sig.t()]) :: boolean
+  def uses_bytes?(sigs) do
+    Enum.any?(sigs, fn s ->
+      Enum.any?([elem(s.ret, 0) | Enum.map(s.params, & &1.type)], &has_bytes?/1)
+    end)
+  end
+
+  defp has_bytes?(:bytes), do: true
+  defp has_bytes?({:list, t}), do: has_bytes?(t)
+  defp has_bytes?(_), do: false
 
   @doc "The per-module C header naming each export's argument and result specs."
   @spec specs_h([Sig.t()]) :: String.t()

@@ -1,4 +1,5 @@
 import Base
+import ./bendler.bend as B
 
 # Murmur3 x86_32 (Austin Appleby's algorithm, as in `preciz/murmur`).
 #
@@ -81,4 +82,18 @@ def batch_murmur3(datas: List<List<U32>>, +seed: U32) -> List<U32>:
       Nil{}
     case d <> t:
       hd tl = murmur3_x86_32(d, seed) batch_murmur3(t, seed)
+      hd <> tl
+
+# The same hash over the prelude's Bytes: an Elixir binary crosses as one
+# buffer block instead of a list cell per byte, and Bend walks it as a
+# list on its side (Bytes.to_list).
+def murmur3(data: B.Bytes, seed: U32) -> U32:
+  murmur3_x86_32(B.Bytes.to_list(data), seed)
+
+def batch_murmur3_bytes(datas: List<B.Bytes>, +seed: U32) -> List<U32>:
+  match datas:
+    case Nil{}:
+      Nil{}
+    case d <> t:
+      hd tl = murmur3(d, seed) batch_murmur3_bytes(t, seed)
       hd <> tl

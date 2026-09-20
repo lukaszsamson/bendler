@@ -92,6 +92,14 @@ override the module's. Put it under a supervisor before calling it.
 | `Bool` | boolean |
 | `Unit` | `:unit` |
 | `List<T>` (also `+List<T>`, `List<&2, T>`) | list |
+| `B.Bytes` (the prelude's) | binary |
+
+`Bytes` comes from a small Bend prelude, `bendler.bend`, that the build
+writes next to any source using it; import it as `import ./bendler.bend
+as B`. A `Bytes{len, buf}` holds one byte per slot of an `Array<U32>`
+buffer, so a binary crosses as one block instead of a list cell per byte
+(30x faster for 64 KB in the Murmur3 demo). `B.Bytes.to_list/1`,
+`B.Bytes.from_list/1` and `B.Bytes.at/2` are the helpers.
 
 A def is exported when all its parameters and its result are of these types.
 Erased (`-`) and template (`~`) parameters, `IO` results, closures, arrays
@@ -200,6 +208,7 @@ lib/bendler/codec.ex    the frame codec
 lib/bendler/port.ex     the port owner: bounded queue, deadline, exit codes
 lib/mix/tasks/          mix compile.bendler and mix bendler.clean
 priv/c/                 the foreign effects and the two transports
+priv/bend/bendler.bend  the prelude (Bytes), copied next to sources that use it
 bend/fib.bend           the example module
 test/support/           Bendler.Examples.FibNif and FibPort, and the crash and admission fixtures
 demos/<name>/           a real port each (Bend source, port module, reference, tests, bench)

@@ -131,4 +131,18 @@ defmodule Bendler.MurmurTest do
       assert MurmurPort.batch_murmur3(datas, 12_345) == expected
     end
   end
+
+  describe "Bytes" do
+    test "the Bytes export agrees with the list export on every boundary length" do
+      for n <- 0..40, seed <- [0, 1, 0xFFFFFFFF] do
+        bin = :crypto.strong_rand_bytes(n)
+        assert MurmurPort.hash(bin, seed) == MurmurPort.murmur3_x86_32(:binary.bin_to_list(bin), seed)
+      end
+    end
+
+    test "a batch of binaries agrees with single calls" do
+      bins = for n <- 1..64, do: :crypto.strong_rand_bytes(n)
+      assert MurmurPort.hash_batch(bins, 7) == Enum.map(bins, &MurmurPort.hash(&1, 7))
+    end
+  end
 end

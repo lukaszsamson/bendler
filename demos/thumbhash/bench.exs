@@ -22,7 +22,8 @@ end
 for {w, h, ops} <- [{16, 16, 200}, {50, 50, 20}, {100, 100, 5}] do
   rgba = image.(w, h)
   measure.("elixir #{w}x#{h}", ops, fn -> ThumbhashReference.encode(w, h, rgba) end)
-  measure.("bend   #{w}x#{h}", ops, fn -> ThumbhashPort.encode(w, h, rgba) end)
+  measure.("bend   #{w}x#{h} (Bytes)", ops, fn -> ThumbhashPort.encode(w, h, rgba) end)
+  measure.("bend   #{w}x#{h} (List<U32>)", ops, fn -> ThumbhashPort.thumbhash(w, h, :binary.bin_to_list(rgba)) end)
 end
 
 images = for _ <- 1..32, do: image.(32, 32)

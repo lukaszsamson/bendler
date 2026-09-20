@@ -5,7 +5,7 @@
 #define BENDLER_COMMON_H
 #include "bendler_specs.h"
 
-enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6 };
+enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7 };
 
 #ifndef BENDLER_MAX_FRAME
 #define BENDLER_MAX_FRAME (64u << 20)   // a request or reply body past this is refused
@@ -63,7 +63,7 @@ static const char* bl_skip_type(const char* ty) {
   for (;;) {
     char k = *ty;
     if (k == 'L') { if (++depth > BL_MAX_DEPTH) bl_fail("type spec nested too deep"); ty += 1; continue; }
-    if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't') return ty + 1;
+    if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y') return ty + 1;
     bl_fail("bad type spec");
   }
 }
@@ -96,6 +96,16 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       if (tag != BL_BOOL || c->p >= c->end || *c->p > 1) { c->err = "expected a Bool"; return; }
       c->p += 1; return;
     case 't': if (tag != BL_UNIT) c->err = "expected a Unit"; return;
+    case 'y': {
+#ifndef BENDLER_CID_BYTES
+      c->err = "this program has no Bytes type"; return;
+#endif
+      if (tag != BL_BYTES || c->end - c->p < 4) { c->err = "expected Bytes"; return; }
+      u32 n = bl_rd32(c->p); c->p += 4;
+      if ((u64)(c->end - c->p) < n) { c->err = "truncated Bytes"; return; }
+      if (n > (1u << 30)) { c->err = "Bytes past 2^30"; return; }
+      c->p += n; return;
+    }
     case 'L': {
 #ifdef BL_NO_LIST
       c->err = "this program has no List type"; return;
@@ -125,6 +135,37 @@ static const char* bl_validate(u32 fn, const u8* p, const u8* end) {
   return NULL;
 }
 
+// Bytes: Bytes{len, buf} with buf a BUF block of one u32 slot per byte,
+// 2^c slots for the smallest c with 2^c >= len (the rest zero); the same
+// layout `[0 : U32*n]` and Array.set build in Bend.
+#ifdef BENDLER_CID_BYTES
+static Term bl_bytes(Env e, const u8* p, u32 n) {
+  u32 c = 0;
+  while ((1ull << c) < n) c += 1;
+  Loc l = heap_alloc(e, buf_wcls(c));
+  if (err_seen(e.mem)) bl_fail("bytes allocation failed");
+  for (u64 i = 0; i < (1ull << c); i += 1) blk_write(e.mem, false, l, (u32)i, i < n ? p[i] : 0);
+  return io_node(e, BENDLER_CID_BYTES, (Term)n, term_blk(false, c, l));
+}
+
+static void bl_bytes_out(Env e, Term x, BlBuf* b) {
+  Term fb[2];
+  spare_free(e, cls_fit(2), ctr_take(e, x, 2, fb));
+  u32  n   = (u32)fb[0];
+  Term blk = fb[1];
+  u64  cap = 1ull << blk_cls(blk);
+  if (n > cap) bl_fail("Bytes len past its buffer");
+  bl_put8(b, BL_BYTES); bl_put32(b, n);
+  u8 chunk[256];
+  for (u64 i = 0; i < n; i += 256) {
+    u64 m = n - i < 256 ? n - i : 256;
+    for (u64 j = 0; j < m; j += 1) chunk[j] = (u8)blk_read(e.mem, false, term_loc(blk), (u32)(i + j));
+    bl_put(b, chunk, m);
+  }
+  blk_free(e, blk);
+}
+#endif
+
 // Decoding (only ever after bl_validate)
 // ======================================
 static Term bl_decode(Env e, const char** ty, int depth) {
@@ -138,6 +179,15 @@ static Term bl_decode(Env e, const char** ty, int depth) {
     case 's': { u32 n = bl_rd32(bl_req); bl_req += 4; t = io_str(e, (const char*)bl_req, n); bl_req += n; break; }
     case 'b': t = term_pak(*bl_req++ ? CID_TRUE : CID_FALSE, 0); break;
     case 't': t = term_pak(CID_UNIT, 0); break;
+    case 'y': {
+#ifdef BENDLER_CID_BYTES
+      u32 n = bl_rd32(bl_req); bl_req += 4;
+      t = bl_bytes(e, bl_req, n); bl_req += n;
+#else
+      bl_fail("no Bytes type"); t = 0;
+#endif
+      break;
+    }
     case 'L': {
       u32 n = bl_rd32(bl_req); bl_req += 4;
       const char* elem = *ty;
@@ -162,6 +212,13 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
     case 'n': bl_put8(b, BL_NAT); bl_put64(b, (u64)x); break;
     case 'b': bl_put8(b, BL_BOOL); bl_put8(b, term_aux(x) == CID_TRUE); break;
     case 't': bl_put8(b, BL_UNIT); break;
+    case 'y':
+#ifdef BENDLER_CID_BYTES
+      bl_bytes_out(e, x, b);
+#else
+      bl_fail("no Bytes type");
+#endif
+      break;
     case 's': {
       u64 n = 0; char* s = io_cstr(e, x, &n);
       if (n > BENDLER_MAX_FRAME) { free(s); bl_fail("reply String past BENDLER_MAX_FRAME"); }
