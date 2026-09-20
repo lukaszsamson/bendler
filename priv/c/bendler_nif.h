@@ -109,7 +109,11 @@ void bendler_start(int threads, int max_waiting) {
   if (pipe(bl_pipe)) { bl_dead = true; snprintf(bl_err, sizeof bl_err, "pipe failed"); return; }
   for (int i = 0; i < 2; i += 1) fcntl(bl_pipe[i], F_SETFL, fcntl(bl_pipe[i], F_GETFL) | O_NONBLOCK);
   pthread_t tid;
-  if (pthread_create(&tid, NULL, bl_thread, (void*)(intptr_t)threads)) { bl_dead = true; snprintf(bl_err, sizeof bl_err, "pthread_create failed"); return; }
+  // deep datatype values recurse in the codec: a stack the BEAM's thread default may not give
+  pthread_attr_t attr; pthread_attr_init(&attr); pthread_attr_setstacksize(&attr, 16u << 20);
+  rc = pthread_create(&tid, &attr, bl_thread, (void*)(intptr_t)threads);
+  pthread_attr_destroy(&attr);
+  if (rc) { bl_dead = true; snprintf(bl_err, sizeof bl_err, "pthread_create failed"); return; }
   pthread_detach(tid);
 }
 

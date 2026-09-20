@@ -6,7 +6,8 @@
 #include "bendler_specs.h"
 
 enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7,
-       BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12, BL_F32 = 13, BL_CHR = 14 };
+       BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12, BL_F32 = 13, BL_CHR = 14,
+       BL_DATA = 15 };
 
 // A Char is a code point: below 0x110000 and not a surrogate.
 static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF); }
@@ -17,7 +18,8 @@ static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF
 #ifndef BENDLER_MAX_ITEMS
 #define BENDLER_MAX_ITEMS (16u << 20)   // list items (all lists together) one request may carry
 #endif
-#define BL_MAX_DEPTH 32                  // composite type/value nesting limit
+#define BL_MAX_DEPTH 2048                // value nesting limit (a recursive datatype nests per level)
+#define BL_MAX_SPEC_DEPTH 32             // type spec nesting limit (a D<index>: does not expand)
 
 typedef struct { u8* p; u64 len; u64 cap; } BlBuf;
 
@@ -62,27 +64,45 @@ static u64  bl_rd64(const u8* p) { return ((u64)bl_rd32(p) << 32) | bl_rd32(p + 
 
 // Prefix grammar: primitives, L/M + one type, R + error/value types,
 // T<arity>: + 2..16 field types. Never scan past a NUL or an unbounded depth.
-static int bl_tuple_arity(const char** ty) {
+// a number in the spec, `digits:`, within lo..hi (the specs are generated: a bad one is a bendler bug)
+static int bl_num(const char** ty, int lo, int hi) {
   int n = 0, digits = 0;
-  while (**ty >= '0' && **ty <= '9' && digits < 2) {
+  while (**ty >= '0' && **ty <= '9' && digits < 4) {
     n = n * 10 + *(*ty)++ - '0'; digits += 1;
   }
-  if (**ty != ':' || n < 2 || n > 16) bl_fail("bad tuple arity");
+  if (**ty != ':' || digits == 0 || n < lo || n > hi) bl_fail("bad number in a type spec");
   *ty += 1;
   return n;
 }
+static int bl_tuple_arity(const char** ty) { return bl_num(ty, 2, 16); }
 static const char* bl_skip_at(const char* ty, int depth) {
-  if (depth > BL_MAX_DEPTH) bl_fail("type spec nested too deep");
+  if (depth > BL_MAX_SPEC_DEPTH) bl_fail("type spec nested too deep");
   char k = *ty;
   if (k == 0) bl_fail("truncated type spec");
   ty += 1;
   if (k == 'u' || k == 'n' || k == 's' || k == 'b' || k == 't' || k == 'y' || k == 'f' || k == 'c') return ty;
+  if (k == 'D') { bl_num(&ty, 0, 9999); return ty; }
   int n = k == 'L' || k == 'M' ? 1 : k == 'R' ? 2 : k == 'T' ? bl_tuple_arity(&ty) : 0;
   if (n == 0) bl_fail("bad type spec");
   for (int i = 0; i < n; i += 1) ty = bl_skip_at(ty, depth + 1);
   return ty;
 }
+
 static const char* bl_skip_type(const char* ty) { return bl_skip_at(ty, 0); }
+
+// The field specs of constructor `ctor` of user datatype `idx`, and how
+// many; NULL when the type has no such constructor.
+static const char* bl_ctor_fields(int idx, int ctor, int* nfields) {
+  const char* ts = BENDLER_TYPE_SPECS[idx];
+  int nctors = bl_num(&ts, 1, 255);
+  if (ctor >= nctors) return NULL;
+  for (int c = 0; c < ctor; c += 1) {
+    int k = bl_num(&ts, 0, 255);
+    for (int i = 0; i < k; i += 1) ts = bl_skip_type(ts);
+  }
+  *nfields = bl_num(&ts, 0, 255);
+  return ts;
+}
 
 // Validation
 // ==========
@@ -104,6 +124,19 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       c->items += n;
       if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many items"; return; }
       for (int i = 0; i < n && !c->err; i += 1) bl_check(c, ty, depth + 1);
+      return;
+    }
+    case 'D': {
+      int idx = bl_num(ty, 0, BENDLER_TYPE_COUNT - 1);
+      if (tag != BL_DATA || c->end - c->p < 2) { c->err = "expected a datatype value"; return; }
+      u8 ctor = c->p[0], n = c->p[1]; c->p += 2;
+      int k = 0;
+      const char* fs = bl_ctor_fields(idx, ctor, &k);
+      if (fs == NULL) { c->err = "no such constructor"; return; }
+      if (k != n) { c->err = "wrong field count for the constructor"; return; }
+      c->items += k;
+      if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many items"; return; }
+      for (int i = 0; i < k && !c->err; i += 1) bl_check(c, &fs, depth + 1);
       return;
     }
     case 'M': {
@@ -181,21 +214,16 @@ static const char* bl_validate(u32 fn, const u8* p, const u8* end) {
 // Bytes: Bytes{len, buf} with buf a BUF block of one u32 slot per byte,
 // 2^c slots for the smallest c with 2^c >= len (the rest zero); the same
 // layout `[0 : U32*n]` and Array.set build in Bend.
-#ifdef BENDLER_CID_BYTES
-static Term bl_bytes(Env e, const u8* p, u32 n) {
+// a {len, buf} node of constructor `cid` (the prelude's Bytes, or its Dyn DB)
+static Term bl_bytes_as(Env e, u64 cid, const u8* p, u32 n) {
   u32 c = 0;
   while ((1ull << c) < n) c += 1;
   Loc l = heap_alloc(e, buf_wcls(c));
   if (err_seen(e.mem)) bl_fail("bytes allocation failed");
   for (u64 i = 0; i < (1ull << c); i += 1) blk_write(e.mem, false, l, (u32)i, i < n ? p[i] : 0);
-  return io_node(e, BENDLER_CID_BYTES, (Term)n, term_blk(false, c, l));
+  return io_node(e, cid, (Term)n, term_blk(false, c, l));
 }
-
-static void bl_bytes_out(Env e, Term x, BlBuf* b) {
-  Term fb[2];
-  spare_free(e, cls_fit(2), ctr_take(e, x, 2, fb));
-  u32  n   = (u32)fb[0];
-  Term blk = fb[1];
+static void bl_blk_out(Env e, u32 n, Term blk, BlBuf* b) {
   u64  cap = 1ull << blk_cls(blk);
   if (n > cap) bl_fail("Bytes len past its buffer");
   bl_put8(b, BL_BYTES); bl_put32(b, n);
@@ -206,6 +234,13 @@ static void bl_bytes_out(Env e, Term x, BlBuf* b) {
     bl_put(b, chunk, m);
   }
   blk_free(e, blk);
+}
+#ifdef BENDLER_CID_BYTES
+static Term bl_bytes(Env e, const u8* p, u32 n) { return bl_bytes_as(e, BENDLER_CID_BYTES, p, n); }
+static void bl_bytes_out(Env e, Term x, BlBuf* b) {
+  Term fb[2];
+  spare_free(e, cls_fit(2), ctr_take(e, x, 2, fb));
+  bl_blk_out(e, (u32)fb[0], fb[1], b);
 }
 #endif
 
@@ -349,4 +384,191 @@ static void bl_put_err(BlBuf* b, const char* msg) {
 
 // A spec String argument as a C string (freed by the caller).
 static char* bl_spec(Env e, Term s) { u64 n = 0; return io_cstr(e, s, &n); }
+
+// Dyn: a value whose type mentions a user datatype crosses as the
+// prelude's Dyn tree (see the Bend prelude), which the shim's generated
+// defs convert. The host builds leaves and DL/DK nodes only; it never lays
+// out a user constructor.
+// =====================================================================
+static bool bl_has_dyn(const char* spec) { return strchr(spec, 'D') != NULL; }
+
+#ifdef BENDLER_CID_DK
+static Term bl_dyn_list(Env e, const Term* items, u32 n) {
+  Term t = term_pak(CID_NIL, 0);
+  for (u32 i = n; i > 0; i -= 1) t = io_node(e, CID_CON, items[i - 1], t);
+  return t;
+}
+
+// reads a Dyn of the type spelled at *ty from the request (validated)
+static Term bl_dyn_decode(Env e, const char** ty, int depth) {
+  if (depth > BL_MAX_DEPTH) bl_fail("value nested too deep");
+  char c = *(*ty)++;
+  u8 tag = *bl_req++;
+  Term t = 0;
+  switch (c) {
+    case 'u': case 'c': t = term_pak(BENDLER_CID_DU, bl_rd32(bl_req)); bl_req += 4; break;
+    case 'f': t = term_pak(BENDLER_CID_DF, bl_rd32(bl_req)); bl_req += 4; break;
+    case 'b': t = term_pak(BENDLER_CID_DU, *bl_req++); break;
+    case 't': t = term_pak(BENDLER_CID_DU, 0); break;
+    case 'n': t = io_box(e, BENDLER_CID_DN, (Term)bl_rd64(bl_req)); bl_req += 8; break;
+    case 's': {
+      u32 n = bl_rd32(bl_req); bl_req += 4;
+      t = io_box(e, BENDLER_CID_DS, io_str(e, (const char*)bl_req, n)); bl_req += n; break;
+    }
+    case 'y': { u32 n = bl_rd32(bl_req); bl_req += 4; t = bl_bytes_as(e, BENDLER_CID_DB, bl_req, n); bl_req += n; break; }
+    case 'L': {
+      u32 n = bl_rd32(bl_req); bl_req += 4;
+      const char* elem = *ty;
+      Term* items = bl_alloc(sizeof(Term) * (n ? n : 1));
+      for (u32 i = 0; i < n; i += 1) { const char* t2 = elem; items[i] = bl_dyn_decode(e, &t2, depth + 1); }
+      *ty = bl_skip_type(elem);
+      t = io_box(e, BENDLER_CID_DL, bl_dyn_list(e, items, n));
+      free(items); break;
+    }
+    case 'T': {
+      int n = bl_tuple_arity(ty); bl_req += 1; // validated wire arity
+      Term items[16];
+      for (int i = 0; i < n; i += 1) items[i] = bl_dyn_decode(e, ty, depth + 1);
+      t = io_box(e, BENDLER_CID_DL, bl_dyn_list(e, items, (u32)n)); break;
+    }
+    case 'M': {
+      const char* end = bl_skip_type(*ty);
+      Term item = 0; u32 n = 0;
+      if (tag == BL_SOME) { item = bl_dyn_decode(e, ty, depth + 1); n = 1; }
+      *ty = end;
+      t = io_box(e, BENDLER_CID_DL, bl_dyn_list(e, &item, n)); break;
+    }
+    case 'R': {
+      const char* value = bl_skip_type(*ty);
+      const char* end = bl_skip_type(value);
+      if (tag == BL_OK) *ty = value;
+      Term item = bl_dyn_decode(e, ty, depth + 1);
+      *ty = end;
+      t = io_node(e, BENDLER_CID_DK, (Term)(tag == BL_OK ? 1 : 0), bl_dyn_list(e, &item, 1)); break;
+    }
+    case 'D': {
+      int idx = bl_num(ty, 0, BENDLER_TYPE_COUNT - 1);
+      u8 ctor = bl_req[0], n = bl_req[1]; bl_req += 2; // validated
+      int k = 0;
+      const char* fs = bl_ctor_fields(idx, ctor, &k);
+      if (fs == NULL || k != n) bl_fail("constructor mismatch after validation");
+      Term* items = bl_alloc(sizeof(Term) * (n ? n : 1));
+      for (int i = 0; i < k; i += 1) items[i] = bl_dyn_decode(e, &fs, depth + 1);
+      t = io_node(e, BENDLER_CID_DK, (Term)ctor, bl_dyn_list(e, items, (u32)k));
+      free(items); break;
+    }
+    default: bl_fail("bad type spec");
+  }
+  (void)tag;
+  return t;
+}
+
+// the fields of a Dyn node of constructor `cid`, or a bendler bug
+static void bl_dyn_take(Env e, Term x, u64 cid, u32 n, Term* out) {
+  if (term_aux(x) != cid) bl_fail("a Dyn of the wrong shape came back from the converter");
+  spare_free(e, cls_fit(n), ctr_take(e, x, n, out));
+}
+static u32 bl_dyn_word(Term x, u64 cid) {
+  if (term_aux(x) != cid) bl_fail("a Dyn of the wrong shape came back from the converter");
+  return (u32)term_loc(x);
+}
+// the next cell of a Dyn list: its head, advancing `*l`
+static Term bl_dyn_next(Env e, Term* l) {
+  if (term_aux(*l) != CID_CON) bl_fail("a Dyn list shorter than its type");
+  Term fb[2];
+  spare_free(e, cls_fit(2), ctr_take(e, *l, 2, fb));
+  *l = fb[1];
+  return fb[0];
+}
+
+// writes the Dyn x, of the type spelled at *ty, consuming it
+static void bl_dyn_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
+  if (depth > BL_MAX_DEPTH) bl_fail("reply nested too deep");
+  char c = *(*ty)++;
+  switch (c) {
+    case 'u': bl_put8(b, BL_U32); bl_put32(b, bl_dyn_word(x, BENDLER_CID_DU)); break;
+    case 'c': bl_put8(b, BL_CHR); bl_put32(b, bl_dyn_word(x, BENDLER_CID_DU)); break;
+    case 'b': bl_put8(b, BL_BOOL); bl_put8(b, bl_dyn_word(x, BENDLER_CID_DU) != 0); break;
+    case 't': bl_put8(b, BL_UNIT); break;
+    case 'f': bl_put8(b, BL_F32); bl_put32(b, bl_dyn_word(x, BENDLER_CID_DF)); break;
+    case 'n': { Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DN, 1, f); bl_put8(b, BL_NAT); bl_put64(b, (u64)f[0]); break; }
+    case 's': {
+      Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DS, 1, f);
+      u64 n = 0; char* s = io_cstr(e, f[0], &n);
+      if (n > BENDLER_MAX_FRAME) { free(s); bl_fail("reply String past BENDLER_MAX_FRAME"); }
+      bl_put8(b, BL_STR); bl_put32(b, (u32)n); bl_put(b, s, n); free(s); break;
+    }
+    case 'y': { Term f[2]; bl_dyn_take(e, x, BENDLER_CID_DB, 2, f); bl_blk_out(e, (u32)f[0], f[1], b); break; }
+    case 'L': {
+      const char* elem = *ty;
+      Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DL, 1, f);
+      bl_put8(b, BL_LIST);
+      u64 at = b->len; bl_put32(b, 0);
+      u32 n = 0; Term l = f[0];
+      while (term_aux(l) == CID_CON) {
+        const char* t2 = elem;
+        bl_dyn_encode(e, &t2, bl_dyn_next(e, &l), b, depth + 1);
+        n += 1;
+      }
+      *ty = bl_skip_type(elem);
+      u8 cnt[4] = { n >> 24, n >> 16, n >> 8, n }; memcpy(b->p + at, cnt, 4);
+      break;
+    }
+    case 'T': {
+      int n = bl_tuple_arity(ty);
+      Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DL, 1, f);
+      bl_put8(b, BL_TUPLE); bl_put8(b, (u8)n);
+      Term l = f[0];
+      for (int i = 0; i < n; i += 1) bl_dyn_encode(e, ty, bl_dyn_next(e, &l), b, depth + 1);
+      break;
+    }
+    case 'M': {
+      const char* end = bl_skip_type(*ty);
+      Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DL, 1, f);
+      Term l = f[0];
+      if (term_aux(l) == CID_CON) { bl_put8(b, BL_SOME); bl_dyn_encode(e, ty, bl_dyn_next(e, &l), b, depth + 1); }
+      else bl_put8(b, BL_NONE);
+      *ty = end; break;
+    }
+    case 'R': {
+      const char* value = bl_skip_type(*ty);
+      const char* end = bl_skip_type(value);
+      Term f[2]; bl_dyn_take(e, x, BENDLER_CID_DK, 2, f);
+      bool ok = (u32)f[0] != 0;
+      Term l = f[1];
+      if (ok) *ty = value;
+      bl_put8(b, ok ? BL_OK : BL_FAIL);
+      bl_dyn_encode(e, ty, bl_dyn_next(e, &l), b, depth + 1);
+      *ty = end; break;
+    }
+    case 'D': {
+      int idx = bl_num(ty, 0, BENDLER_TYPE_COUNT - 1);
+      Term f[2]; bl_dyn_take(e, x, BENDLER_CID_DK, 2, f);
+      u32 ctor = (u32)f[0];
+      int k = 0;
+      const char* fs = bl_ctor_fields(idx, (int)ctor, &k);
+      if (fs == NULL) bl_fail("a constructor index outside its type came back");
+      bl_put8(b, BL_DATA); bl_put8(b, (u8)ctor); bl_put8(b, (u8)k);
+      Term l = f[1];
+      for (int i = 0; i < k; i += 1) bl_dyn_encode(e, &fs, bl_dyn_next(e, &l), b, depth + 1);
+      break;
+    }
+    default: bl_fail("bad return type spec");
+  }
+}
+#else
+static Term bl_dyn_decode(Env e, const char** ty, int depth) { (void)e; (void)ty; (void)depth; bl_fail("this program has no datatypes"); return 0; }
+static void bl_dyn_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) { (void)e; (void)ty; (void)x; (void)b; (void)depth; bl_fail("this program has no datatypes"); }
+#endif
+
+// one argument or result of the spec: canonical Base terms, or a Dyn when
+// the spec mentions a datatype
+static Term bl_decode_spec(Env e, const char* spec) {
+  const char* ty = spec;
+  return bl_has_dyn(spec) ? bl_dyn_decode(e, &ty, 0) : bl_decode(e, &ty, 0);
+}
+static void bl_encode_spec(Env e, const char* spec, Term x, BlBuf* b) {
+  const char* ty = spec;
+  if (bl_has_dyn(spec)) bl_dyn_encode(e, &ty, x, b, 0); else bl_encode(e, &ty, x, b, 0);
+}
 #endif

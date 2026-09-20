@@ -18,7 +18,8 @@ defmodule Bendler do
   `:nan`, `:infinity`, `:neg_infinity`), `String` a binary, `Bool` a
   boolean, `Unit` the atom `:unit`, `List<T>` a list, `A & B` a tuple,
   `Maybe<T>` and `Result<E, T>` tagged tuples, `Map<V>` a map with binary
-  keys.
+  keys, and a user `type` of the file a tagged tuple per constructor
+  (`{:circle, r}`, or the atom `:dot` for a constructor without fields).
 
   ## Options
 
@@ -77,21 +78,26 @@ defmodule Bendler do
       exports: cfg.exports
     }
 
-    sigs =
+    {sigs, types} =
       if Bendler.Build.mix_compiler?() do
         Bendler.Build.request!(request)
       else
-        {sigs, _artifact} = Bendler.Build.build!(request)
-        sigs
+        {sigs, types, _artifact} = Bendler.Build.build!(request)
+        {sigs, types}
       end
+
+    codec_types = Bendler.Sig.codec_types(types)
 
     funs =
       sigs
       |> Enum.with_index()
-      |> Enum.map(fn {sig, i} -> Bendler.define(sig, i) end)
+      |> Enum.map(fn {sig, i} -> Bendler.define(sig, i, codec_types) end)
+
+    typedefs = Enum.map(types, &Bendler.Sig.data_typespec/1)
 
     quote do
       @external_resource unquote(cfg.source)
+      unquote_splicing(typedefs)
       unquote(Bendler.loader(cfg, name))
       unquote_splicing(funs)
     end
@@ -211,7 +217,7 @@ defmodule Bendler do
   def result(bin, fun) when is_binary(bin), do: Bendler.Codec.reply(bin, fun)
 
   @doc false
-  def define(%Bendler.Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig, index) do
+  def define(%Bendler.Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig, index, codec) do
     fname = name |> String.replace(".", "_") |> String.to_atom()
     vars = Enum.map(params, &Macro.var(String.to_atom(&1.name), __MODULE__))
     pairs = Enum.zip(vars, Enum.map(params, & &1.type))
@@ -230,13 +236,15 @@ defmodule Bendler do
             unquote(index),
             unquote(
               Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
-            )
+            ),
+            unquote(Macro.escape(codec))
           )
 
         Bendler.Codec.check(
           Bendler.result(__bendler_send__(frame), unquote(fname)),
           unquote(Macro.escape(ret_t)),
-          unquote(fname)
+          unquote(fname),
+          unquote(Macro.escape(codec))
         )
       end
     end

@@ -85,3 +85,92 @@ def Bytes.from_list(xs: List<U32>) -> Bytes:
   +ys = Bytes.share(xs)
   +n = U32.from_nat(List.length(&2, U32, ys))
   Bytes.from_list.fin(Bytes.fill(ys, (Array.new(U32, Bytes.depth(n), 0), 0)))
+
+# Dyn
+# ===
+
+# A dynamic value: the shape every user datatype crosses in. The host
+# builds one of these for an argument that holds a user datatype and reads
+# one back for such a result; generated defs in the shim convert between a
+# Dyn and the user's type. Numbers, strings and bytes are leaves; a list, a
+# tuple and an option (zero or one element) are a DL; a constructor (a user
+# one, or a Result's Fail/Done as 0/1) is a DK with its fields as kids.
+type Dyn is Type:
+  DU{w: U32}
+  DF{f: F32}
+  DN{n: Nat}
+  DS{s: String}
+  DB{len: U32, buf: Array<U32>}
+  DL{xs: List<&1, Dyn>}
+  DK{tag: U32, kids: List<&1, Dyn>}
+
+def Dyn.u32(d: Dyn) -> U32:
+  match d:
+    case DU{w}:
+      w
+    case _:
+      0
+
+def Dyn.bool(d: Dyn) -> Bool:
+  match d:
+    case DU{w}:
+      U32.is_eq(w, 1)
+    case _:
+      False{}
+
+def Dyn.chr(d: Dyn) -> Char:
+  match d:
+    case DU{w}:
+      Char.from_u32(w)
+    case _:
+      Char.from_u32(0)
+
+def Dyn.f32(d: Dyn) -> F32:
+  match d:
+    case DF{f}:
+      f
+    case _:
+      0.0
+
+def Dyn.nat(d: Dyn) -> Nat:
+  match d:
+    case DN{n}:
+      n
+    case _:
+      0n
+
+def Dyn.str(d: Dyn) -> String:
+  match d:
+    case DS{s}:
+      s
+    case _:
+      ""
+
+def Dyn.bytes(d: Dyn) -> Bytes:
+  match d:
+    case DB{len, buf}:
+      Bytes{len, buf}
+    case _:
+      Bytes{0, Array.new(U32, 0n, 0)}
+
+def Dyn.of_bytes(b: Bytes) -> Dyn:
+  match b:
+    case Bytes{len, buf}:
+      DB{len, buf}
+
+def Dyn.list(d: Dyn) -> List<&1, Dyn>:
+  match d:
+    case DL{xs}:
+      xs
+    case _:
+      []
+
+def Dyn.unit(d: Dyn) -> Unit:
+  match d:
+    case _:
+      Unit{}
+
+def Dyn.of_unit(u: Unit) -> Dyn:
+  match u:
+    case Unit{}:
+      DU{0}

@@ -34,14 +34,14 @@ defmodule Bendler.Build do
   @spec mix_compiler?() :: boolean
   def mix_compiler?, do: :bendler in (Mix.Project.config()[:compilers] || [])
 
-  @doc "Records a build request for `mix compile.bendler` and returns the exports."
-  @spec request!(opts) :: [Sig.t()]
+  @doc "Records a build request for `mix compile.bendler` and returns the exports and datatypes."
+  @spec request!(opts) :: {[Sig.t()], Sig.types()}
   def request!(%{name: name} = opts) do
-    {sigs, _src} = exports!(opts)
+    {sigs, _src, types} = exports!(opts)
     dir = requests_dir()
     File.mkdir_p!(dir)
     File.write!(Path.join(dir, name <> ".request"), :erlang.term_to_binary(opts))
-    sigs
+    {sigs, types}
   end
 
   @doc "The build requests recorded by this application's modules (stale ones are dropped)."
@@ -74,23 +74,23 @@ defmodule Bendler.Build do
 
   defp exports!(%{module: module, source: source} = opts) do
     src = File.read!(source)
-    {sigs, skipped} = Sig.parse(src)
+    {sigs, skipped, types} = Sig.parse(src)
     sigs = filter(sigs, opts[:exports], module)
 
     for {n, why} <- skipped, opts[:exports] == nil or n in opts[:exports] do
       Logger.debug("bendler: #{inspect(module)} does not export #{n}: #{why}")
     end
 
-    {sigs, src}
+    {sigs, src, types}
   end
 
-  @doc "Builds and returns the exports and the artifact path."
-  @spec build!(opts, keyword) :: {[Sig.t()], Path.t()}
+  @doc "Builds and returns the exports, the datatypes and the artifact path."
+  @spec build!(opts, keyword) :: {[Sig.t()], Sig.types(), Path.t()}
   def build!(
         %{module: module, source: source, backend: backend, name: name} = opts,
         build_opts \\ []
       ) do
-    {sigs, src} = exports!(opts)
+    {sigs, src, types} = exports!(opts)
     version_gate!()
 
     build_dir = Path.join([Mix.Project.build_path(), "bendler", to_string(app()), name])
@@ -100,10 +100,7 @@ defmodule Bendler.Build do
 
     artifact = Path.join(out_dir, if(backend == :nif, do: name <> ".so", else: name))
     rel = Path.relative_to(Path.expand(source), build_dir, force: true) |> relativize()
-    prelude = if Gen.uses_bytes?(sigs), do: prelude!(source, build_dir)
-    shim = Gen.shim(rel, sigs, prelude)
-    bytes_flag = fn c -> if prelude, do: ["-DBENDLER_CID_BYTES=" <> bytes_cid!(c)], else: [] end
-    specs = Gen.specs_h(sigs)
+    {shim, specs, bytes_flag} = shim!(rel, sigs, types, source, build_dir)
     c_sources = Enum.map(@c_files, &File.read!(Path.join(c_dir(), &1)))
 
     glue =
@@ -117,7 +114,7 @@ defmodule Bendler.Build do
     stamp_file = Path.join(build_dir, "stamp")
 
     if not build_opts[:force] and File.exists?(artifact) and File.read(stamp_file) == {:ok, stamp} do
-      {sigs, artifact}
+      {sigs, types, artifact}
     else
       Logger.info("bendler: building #{inspect(module)} (#{backend}) from #{source}")
       for f <- @c_files, do: File.cp!(Path.join(c_dir(), f), Path.join(build_dir, f))
@@ -136,7 +133,7 @@ defmodule Bendler.Build do
 
       File.rename!(staged, artifact)
       File.write!(stamp_file, stamp)
-      {sigs, artifact}
+      {sigs, types, artifact}
     end
   end
 
@@ -182,16 +179,34 @@ defmodule Bendler.Build do
     Path.relative_to(path, build_dir, force: true) |> relativize()
   end
 
-  # The C name of the prelude's Bytes constructor, as the emitted source
-  # spells it (it depends on the import path), for the codec.
-  defp bytes_cid!(c_path) do
-    case Regex.run(~r/^#define (CID_\S*BENDLER_BYTES) \d+$/m, File.read!(c_path)) do
-      [_, macro] ->
-        macro
+  # the shim, the specs header and the compiler flags naming the prelude's
+  # constructors (a function of the emitted C, known only after bend runs)
+  defp shim!(rel, sigs, types, source, build_dir) do
+    uses = %{bytes: Gen.uses_bytes?(sigs), data: Gen.uses_data?(sigs)}
+    prelude = if uses.bytes or uses.data, do: prelude!(source, build_dir)
+    flags = fn c -> if prelude, do: prelude_flags!(c, uses), else: [] end
+    {Gen.shim(rel, sigs, prelude, types), Gen.specs_h(sigs, types), flags}
+  end
 
-      nil ->
-        raise Bendler.Error, "the emitted C has no Bytes constructor; is the prelude imported?"
-    end
+  @dyn_ctors ~w(DU DF DN DS DB DL DK)
+
+  # The C names of the prelude's constructors, as the emitted source spells
+  # them (they depend on the import path), for the codec: Bytes when an
+  # export carries bytes, every Dyn constructor when one carries a datatype.
+  defp prelude_flags!(c_path, uses) do
+    c = File.read!(c_path)
+    wanted = if(uses.bytes, do: ["BYTES"], else: []) ++ if(uses.data, do: @dyn_ctors, else: [])
+
+    Enum.map(wanted, fn name ->
+      case Regex.run(~r/^#define (CID_\S*BENDLER_#{name}) \d+$/m, c) do
+        [_, macro] ->
+          "-DBENDLER_CID_#{name}=#{macro}"
+
+        nil ->
+          raise Bendler.Error,
+                "the emitted C has no #{name} constructor of the prelude; is the prelude imported?"
+      end
+    end)
   end
 
   defp filter(sigs, nil, _), do: sigs

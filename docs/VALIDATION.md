@@ -171,3 +171,23 @@ Codec unit tests: a double past the single range, an integer or a string
 as `F32` raise; negative, surrogate and past-range Chars raise; a reply
 Char is range-checked on the host; a map with atom keys or a pair list in
 place of a map raise; the pair list becomes a map in `check/3`.
+
+## User datatypes (2026-09-20)
+
+Full suite: **75 tests passed**; warnings-as-errors, format, credo
+(strict), dialyzer and `mix docs --warnings-as-errors` clean.
+
+| check | port | NIF |
+|---|---|---|
+| `Shape` (three constructors, one nullary) in, out, in a list, in a Maybe, a tuple and a Result | yes | yes |
+| `Tree` with `T`, `Maybe<&2, T>` and `List<&2, T>` fields: sum in Bend, echo back unchanged | yes | yes |
+| a linked list 300 constructors deep, built in Elixir and in Bend | yes | yes |
+| `Rec is Type` holding a Shape, Bytes, a list of pairs with F32 and a `Maybe<Result<U32, Char>>` | yes | yes |
+| encoding a wrong constructor, arity or field type raises `ArgumentError`; `{:dot}` is not `:dot` | yes | yes |
+| native validation refuses an out-of-range constructor index, a wrong field count and a wrong field type before dispatch | yes | yes |
+| parser rules: type parameters, no finite constructor, mutual types, Map field, `List<Maybe<T>>`, `List<T>` on a Data type, `Map<T>` parameter, each with its reason | — | — |
+
+The ThumbHash demo's `Px`, `Pos` and `Ch` types became exportable without
+a change to the demo. Measured through the port: a 4093-node tree in
+1.6 ms, round trip 3.6 ms; a 2000-cell linked list 2.7 ms in, 1.1 ms
+out; 10,000 three-field records 5.3 ms.

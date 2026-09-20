@@ -92,3 +92,67 @@ result; `List<Map<U32>>` or `Map<U32> & U32` keep a def out. Keys are
 binaries; an Elixir map with other keys raises `ArgumentError` on encode.
 The Elixir side receives the pair list and builds the map in `check/3`;
 duplicates cannot occur because the trie has none.
+
+## User datatypes
+
+A `type` declared in the exported file crosses as tagged tuples:
+
+```
+type Shape is Data:
+  Circle{r: U32}
+  Rect{w: U32, h: U32, name: String}
+  Dot{}
+
+type Tree is Data:
+  Leaf{v: U32}
+  Node{l: Tree, ms: Maybe<&2, Tree>, ts: List<&2, Tree>, tag: String}
+```
+
+| Bend | Elixir |
+|---|---|
+| `Circle{3}` | `{:circle, 3}` |
+| `Rect{1, 2, "r"}` | `{:rect, 1, 2, "r"}` |
+| `Dot{}` | `:dot` |
+| `Node{Leaf{1}, None{}, [], "n"}` | `{:node, {:leaf, 1}, :none, [], "n"}` |
+
+The constructor name is underscored (`MNode` is `:m_node`) and the
+generated module gets a `@type` per datatype. A one-element tuple is not a
+constructor: `{:dot}` raises, `:dot` is the value.
+
+**How it crosses.** The compiler decides a constructor's memory layout
+(fields of non-recursive types are flattened into the parent node), so
+bendler does not build user constructors from C. Instead the prelude
+declares `Dyn`, a small tree of leaves (`DU`, `DF`, `DN`, `DS`, `DB`) and
+nodes (`DL` for lists, tuples and options; `DK{tag, kids}` for
+constructors and Result), whose constructors C can build canonically like
+the Base ones. The shim gets generated defs: `Bendler.to_T(fuel, ds)`
+turns a list of `Dyn` into a list of `T` and `Bendler.of_T(fuel, xs)` the
+other way. Bend allows neither forward references nor mutual recursion, so
+each is one def that recurses on a `Nat` fuel, with the loops over the
+type's own lists and options inside it; composite field types that do not
+mention `T` get their own acyclic helpers. Wire tag 15 carries the
+constructor index and field count; the native validator checks both
+against the generated `BENDLER_TYPE_SPECS` table before dispatch, and the
+Elixir side converts `{:data, index, fields}` into the tagged tuple in
+`check/4`. The converters are total: a `Dyn` of the wrong shape (which
+validation excludes) yields the type's first finite constructor.
+
+**Rules**, each reported as the reason a def is skipped:
+
+- no type parameters, no erased (`-`) fields, no `Map` field, and a
+  `Map<V>` parameter's `V` holds no datatype;
+- a type may hold itself only as a whole field `T`, `List<T>` or
+  `Maybe<T>`, spelled `List<&2, T>` and `Maybe<&2, T>` when `T is Data`
+  (Bend requires that kind anyway); `List<Maybe<T>>` or `(T & U32)` inside
+  `T` are not converted;
+- two types may not refer to each other (a type may hold another type
+  that does not hold it back);
+- some constructor must have a finite value, for the fallback.
+
+**Limits and cost.** Values nest up to 2048 constructors deep (a linked
+list of 2048 cells; use `List<T>` for sequences). Each node costs a `Dyn`
+allocation on both sides plus the converter's pattern matches: a 4093-node
+tree crosses into Bend in 1.6 ms and round-trips in 3.6 ms through the
+port, and a list of 10,000 three-field records in 5.3 ms, of which the
+Elixir encoder is about a third. Prefer flat `List<T>` of small records
+over deep recursion when speed matters.

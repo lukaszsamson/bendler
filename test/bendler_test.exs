@@ -23,7 +23,7 @@ defmodule BendlerTest do
 
   describe "Sig.parse/1" do
     test "reads the exportable defs and skips the rest" do
-      {sigs, skipped} = Sig.parse(File.read!("bend/fib.bend"))
+      {sigs, skipped, _} = Sig.parse(File.read!("bend/fib.bend"))
 
       assert Enum.map(sigs, & &1.name) ==
                ~w(fib sum shout range is_big square pow2 words nest slow byte_sum.go byte_sum rev_bytes second_byte.fin second_byte)
@@ -34,7 +34,7 @@ defmodule BendlerTest do
       assert [%{type: {:tuple, [:bytes, :u32]}}] =
                Enum.find(sigs, &(&1.name == "second_byte.fin")).params
 
-      {sigs, skipped} =
+      {sigs, skipped, _} =
         Sig.parse("""
         def id(-A: Type, x: A) -> A:
           x

@@ -1,8 +1,7 @@
 #include BENDLER_TRANSPORT
 Term bendler_arg_run(Env e, Term* f, IoWork* w) {
   char* spec = bl_spec(e, f[0]);
-  const char* ty = spec;
-  Term t = bl_decode(e, &ty, 0);
+  Term t = bl_decode_spec(e, spec);
   free(spec);
   return t;
 }

@@ -7,8 +7,7 @@ Term bendler_reply_run(Env e, Term* f, IoWork* w) {
   if (spec[0] == '!') {
     bl_put_err(&b, "unknown function index");
   } else {
-    const char* ty = spec;
-    bl_encode(e, &ty, f[1], &b, 0);
+    bl_encode_spec(e, spec, f[1], &b);
   }
   free(spec);
   bl_frame_reply(&b);

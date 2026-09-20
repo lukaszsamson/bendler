@@ -99,12 +99,17 @@ override the module's. Put it under a supervisor before calling it.
 | `F32` | float, rounded to single precision; `:nan`, `:infinity`, `:neg_infinity` for the values the BEAM has no float for |
 | `Char` | integer code point (`0..0x10FFFF`, no surrogates) |
 | `Map<V>` (also `Map<&2, V>`), a whole parameter or result | map with binary keys |
+| `type T is Data:` of the same file | `{:ctor, field, ...}` per constructor, `:ctor` without fields |
 
 These types compose recursively, including bytes inside tuples and variants;
 only `Map` has to be a whole parameter or result, because it crosses as a
 list of pairs that Base's `Map.from_list` and `Map.to_list` convert on the
-Bend side. See [type contracts](docs/TYPES.md) for nesting limits,
-parentheses, the float policy and the distinction between Result failures
+Bend side. A user datatype crosses as the prelude's `Dyn` tree, converted
+by defs the build generates into the shim, so `type Shape is Data:` with
+`Circle{r: U32}` and `Dot{}` takes `{:circle, 3}` and `:dot`; recursive
+types (a tree, a linked list) work, with the rules in `Bendler.Sig`. See
+[type contracts](docs/TYPES.md) for nesting limits, parentheses, the float
+policy, the datatype rules and the distinction between Result failures
 (data) and transport exceptions.
 
 `Bytes` comes from a small Bend prelude, `bendler.bend`, that the build
