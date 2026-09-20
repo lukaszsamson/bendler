@@ -20,6 +20,7 @@ defmodule Bendler.Build do
   @supported_bend "bend 2.0.20"
   @c_files ~w(bendler_common.h bendler_port.h bendler_nif.h bendler_fn.c bendler_arg.c bendler_reply.c
               bendler_fn.js bendler_arg.js bendler_reply.js)
+  @launcher "bendler_launcher"
 
   @type opts :: %{
           module: module,
@@ -68,9 +69,62 @@ defmodule Bendler.Build do
   end
 
   defp requests_dir,
-    do: Path.join([Mix.Project.build_path(), "bendler", to_string(app()), "requests"])
+    do: Path.join([build_root(), "requests"])
 
   defp app, do: Mix.Project.config()[:app]
+
+  # Mix symlinks an application's priv directory into every environment's
+  # build. Keep native artifacts below an explicit environment and target
+  # segment, rather than relying on that symlink (or on build_path's current
+  # layout) for isolation. These values are also baked into the loader.
+  @doc false
+  @spec artifact_dir(atom | String.t()) :: Path.t()
+  def artifact_dir(_app), do: Path.join(priv_dir(), artifact_relative_dir())
+
+  @doc false
+  @spec build_scope(atom | String.t()) :: Path.t()
+  def build_scope(_app), do: build_root()
+
+  @doc false
+  @spec clean!(atom | String.t()) :: :ok
+  def clean!(app) do
+    out_dir = artifact_dir(app)
+    File.mkdir_p!(out_dir)
+
+    :ok =
+      with_lock(Path.join(out_dir, ".lock"), fn ->
+        remove_children!(build_scope(app), ["requests"])
+        remove_children!(out_dir, [".lock"])
+        :ok
+      end)
+  end
+
+  @doc false
+  @spec artifact_relative_path(String.t(), :nif | :port) :: Path.t()
+  def artifact_relative_path(name, backend) do
+    Path.join([artifact_relative_dir(), if(backend == :nif, do: name <> ".so", else: name)])
+  end
+
+  @doc false
+  @spec artifact_path(atom, String.t(), :nif | :port) :: Path.t()
+  def artifact_path(_app, name, backend) do
+    Path.join(priv_dir(), artifact_relative_path(name, backend))
+  end
+
+  @doc false
+  @spec launcher_path(atom, String.t()) :: Path.t()
+  def launcher_path(app, _name), do: Path.join([artifact_dir(app), @launcher])
+
+  defp build_root,
+    do: Path.join([Mix.Project.build_path(), "bendler", to_string(app()), target(), env()])
+
+  defp artifact_relative_dir, do: Path.join(["bendler", target(), env()])
+
+  defp env, do: Mix.env() |> to_string()
+
+  defp target do
+    if function_exported?(Mix, :target, 0), do: Mix.target() |> to_string(), else: "host"
+  end
 
   defp exports!(%{module: module, source: source} = opts) do
     src = File.read!(source)
@@ -93,15 +147,16 @@ defmodule Bendler.Build do
     {sigs, src, types} = exports!(opts)
     version_gate!()
 
-    build_dir = Path.join([Mix.Project.build_path(), "bendler", to_string(app()), name])
-    out_dir = Path.join(priv_dir(), "bendler")
-    File.mkdir_p!(build_dir)
+    build_dir = Path.join([build_root(), name])
+    out_dir = artifact_dir(app())
     File.mkdir_p!(out_dir)
 
-    artifact = Path.join(out_dir, if(backend == :nif, do: name <> ".so", else: name))
+    artifact = artifact_path(app(), name, backend)
+    launcher = if backend == :port, do: launcher_path(app(), name)
     rel = Path.relative_to(Path.expand(source), build_dir, force: true) |> relativize()
     {shim, specs, bytes_flag} = shim!(rel, sigs, types, source, build_dir)
     c_sources = Enum.map(@c_files, &File.read!(Path.join(c_dir(), &1)))
+    launcher_source = if backend == :port, do: File.read!(Path.join(c_dir(), @launcher <> ".c"))
 
     glue =
       if backend == :nif,
@@ -109,33 +164,146 @@ defmodule Bendler.Build do
         else: ""
 
     stamp =
-      fingerprint({src, imports(source), shim, specs, c_sources, glue, backend, toolchain()})
+      fingerprint(
+        {src, imports(source), shim, specs, c_sources, launcher_source, glue, backend,
+         toolchain()}
+      )
 
     stamp_file = Path.join(build_dir, "stamp")
 
-    if not Keyword.get(build_opts, :force, false) and File.exists?(artifact) and
-         File.read(stamp_file) == {:ok, stamp} do
-      {sigs, types, artifact}
-    else
-      Logger.info("bendler: building #{inspect(module)} (#{backend}) from #{source}")
-      for f <- @c_files, do: File.cp!(Path.join(c_dir(), f), Path.join(build_dir, f))
-      File.write!(Path.join(build_dir, "shim.bend"), shim)
-      File.write!(Path.join(build_dir, "bendler_specs.h"), specs)
-      c_path = Path.join(build_dir, "shim.c")
-      _ = File.rm(c_path)
-      _ = File.rm(stamp_file)
-      run!(bend(), ["shim.bend", "-o", "shim.c"], build_dir)
+    # A project can be compiled by multiple Mix invocations at once. The
+    # lock covers the shared generated C, worker, launcher and stamp; the
+    # second builder rechecks the completed artifact after acquiring it.
+    {_, _, _} =
+      with_lock(Path.join(out_dir, ".lock"), fn ->
+        File.mkdir_p!(build_dir)
 
-      # stage under a unique name, then rename: a failed build never
-      # replaces the artifact a running system may still be loading
-      staged = artifact <> ".building." <> Integer.to_string(System.unique_integer([:positive]))
+        if not Keyword.get(build_opts, :force, false) and artifact_ready?(artifact, launcher) and
+             File.read(stamp_file) == {:ok, stamp} do
+          {sigs, types, artifact}
+        else
+          rebuild!(%{
+            module: module,
+            backend: backend,
+            source: source,
+            build_dir: build_dir,
+            artifact: artifact,
+            launcher: launcher,
+            stamp_file: stamp_file,
+            stamp: stamp,
+            shim: shim,
+            specs: specs,
+            glue: glue,
+            bytes_flag: bytes_flag,
+            sigs: sigs,
+            types: types
+          })
+        end
+      end)
+  end
 
-      compile!(backend, build_dir, c_path, staged, glue, bytes_flag.(c_path))
+  defp rebuild!(%{
+         module: module,
+         backend: backend,
+         source: source,
+         build_dir: build_dir,
+         artifact: artifact,
+         launcher: launcher,
+         stamp_file: stamp_file,
+         stamp: stamp,
+         shim: shim,
+         specs: specs,
+         glue: glue,
+         bytes_flag: bytes_flag,
+         sigs: sigs,
+         types: types
+       }) do
+    Logger.info("bendler: building #{inspect(module)} (#{backend}) from #{source}")
+    for f <- @c_files, do: File.cp!(Path.join(c_dir(), f), Path.join(build_dir, f))
+    File.write!(Path.join(build_dir, "shim.bend"), shim)
+    File.write!(Path.join(build_dir, "bendler_specs.h"), specs)
+    c_path = Path.join(build_dir, "shim.c")
+    _ = File.rm(c_path)
+    _ = File.rm(stamp_file)
+    run!(bend(), ["shim.bend", "-o", "shim.c"], build_dir)
 
-      File.rename!(staged, artifact)
-      File.write!(stamp_file, stamp)
-      {sigs, types, artifact}
+    # Stage both port components under unique names. The stamp is written
+    # last, so a cache hit can never observe a partly-published pair.
+    staged = staged_path(artifact)
+    compile!(backend, build_dir, c_path, staged, glue, bytes_flag.(c_path))
+    publish_launcher!(launcher, build_dir)
+    File.rename!(staged, artifact)
+    File.write!(stamp_file, stamp)
+    {sigs, types, artifact}
+  end
+
+  defp publish_launcher!(nil, _build_dir), do: :ok
+
+  defp publish_launcher!(launcher, build_dir) do
+    staged = staged_path(launcher)
+    compile_launcher!(build_dir, staged)
+    File.rename!(staged, launcher)
+  end
+
+  defp remove_children!(dir, keep) do
+    entries =
+      case File.ls(dir) do
+        {:ok, entries} -> entries
+        {:error, :enoent} -> []
+      end
+
+    Enum.each(entries -- keep, &File.rm_rf!(Path.join(dir, &1)))
+    :ok
+  end
+
+  defp artifact_ready?(artifact, nil), do: File.regular?(artifact)
+
+  defp artifact_ready?(artifact, launcher),
+    do: File.regular?(artifact) and File.regular?(launcher)
+
+  defp staged_path(path) do
+    path <>
+      ".building." <>
+      System.pid() <>
+      "." <>
+      Integer.to_string(System.unique_integer([:positive]))
+  end
+
+  defp compile_launcher!(build_dir, staged) do
+    run!(
+      cc(),
+      ~w(-std=c11 -O3) ++ [Path.join(c_dir(), @launcher <> ".c"), "-o", staged],
+      build_dir
+    )
+  end
+
+  @spec with_lock(Path.t(), (-> result)) :: result when result: var
+  defp with_lock(lock, fun), do: with_lock(lock, fun, 0)
+
+  @spec with_lock(Path.t(), (-> result), non_neg_integer()) :: result when result: var
+  defp with_lock(lock, fun, attempts) when attempts < 12_000 do
+    case File.mkdir(lock) do
+      :ok ->
+        File.write!(Path.join(lock, "owner"), System.pid())
+
+        try do
+          fun.()
+        after
+          _ = File.rm(Path.join(lock, "owner"))
+          _ = File.rmdir(lock)
+        end
+
+      {:error, :eexist} ->
+        Process.sleep(25)
+        with_lock(lock, fun, attempts + 1)
+
+      {:error, reason} ->
+        raise Bendler.Error, "could not lock Bendler build #{lock}: #{:file.format_error(reason)}"
     end
+  end
+
+  defp with_lock(lock, _fun, _attempts) do
+    raise Bendler.Error, "timed out waiting for Bendler build lock #{lock}"
   end
 
   # clang builds the emitted C into `staged`: an executable, or a shared
@@ -174,7 +342,9 @@ defmodule Bendler.Build do
 
     if File.read(path) != {:ok, template} do
       Logger.info("bendler: writing the prelude to #{path}")
-      File.write!(path, template)
+      staged = staged_path(path)
+      File.write!(staged, template)
+      File.rename!(staged, path)
     end
 
     Path.relative_to(path, build_dir, force: true) |> relativize()

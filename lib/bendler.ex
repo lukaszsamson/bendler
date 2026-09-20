@@ -93,7 +93,7 @@ defmodule Bendler do
     funs =
       sigs
       |> Enum.with_index()
-      |> Enum.map(fn {sig, i} -> Bendler.define(sig, i, codec_types) end)
+      |> Enum.map(fn {sig, i} -> Bendler.define(sig, i, codec_types, cfg.backend) end)
 
     typedefs = Enum.map(types, &Bendler.Sig.data_typespec/1)
 
@@ -143,12 +143,14 @@ defmodule Bendler do
   @doc false
   def loader(%{backend: :nif} = cfg, name) do
     ms = if cfg.timeout == :infinity, do: -1, else: cfg.timeout
+    # load_nif receives the library stem and adds the platform extension.
+    artifact = Bendler.Build.artifact_relative_path(name, :nif) |> String.trim_trailing(".so")
 
     quote do
       @on_load :__bendler_load__
       @doc false
       def __bendler_load__ do
-        path = Path.join([:code.priv_dir(unquote(cfg.otp_app)), "bendler", unquote(name)])
+        path = Path.join(:code.priv_dir(unquote(cfg.otp_app)), unquote(artifact))
 
         :erlang.load_nif(
           String.to_charlist(path),
@@ -171,16 +173,19 @@ defmodule Bendler do
   end
 
   def loader(%{backend: :port} = cfg, name) do
+    artifact = Bendler.Build.artifact_relative_path(name, :port)
+
     quote do
       @doc "Starts the Bend port under the caller; also usable as a child spec. Options override the module's."
       def start_link(opts \\ []) do
-        exe = Path.join([:code.priv_dir(unquote(cfg.otp_app)), "bendler", unquote(name)])
+        exe = Path.join(:code.priv_dir(unquote(cfg.otp_app)), unquote(artifact))
 
         Bendler.Port.start_link(
           Keyword.merge(
             [
               name: __MODULE__,
               exe: exe,
+              launcher: Path.join(Path.dirname(exe), "bendler_launcher"),
               threads: unquote(cfg.threads),
               timeout: unquote(cfg.timeout),
               max_queue: unquote(cfg.max_queue)
@@ -219,7 +224,12 @@ defmodule Bendler do
   def result(bin, fun) when is_binary(bin), do: Bendler.Codec.reply(bin, fun)
 
   @doc false
-  def define(%Bendler.Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig, index, codec) do
+  def define(
+        %Bendler.Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig,
+        index,
+        codec,
+        backend
+      ) do
     fname = name |> String.replace(".", "_") |> String.to_atom()
     vars = Enum.map(params, &Macro.var(String.to_atom(&1.name), __MODULE__))
     pairs = Enum.zip(vars, Enum.map(params, & &1.type))
@@ -233,21 +243,23 @@ defmodule Bendler do
       @doc "Bend: `#{unquote(sig_text)}` (line #{unquote(sig.line)})."
       @spec unquote(fname)(unquote_splicing(types)) :: unquote(ret_spec)
       def unquote(fname)(unquote_splicing(vars)) do
-        frame =
-          Bendler.Codec.request(
-            unquote(index),
-            unquote(
-              Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
-            ),
+        Bendler.Telemetry.span(__MODULE__, unquote(fname), unquote(backend), fn ->
+          frame =
+            Bendler.Codec.request(
+              unquote(index),
+              unquote(
+                Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
+              ),
+              unquote(Macro.escape(codec))
+            )
+
+          Bendler.Codec.check(
+            Bendler.result(__bendler_send__(frame), unquote(fname)),
+            unquote(Macro.escape(ret_t)),
+            unquote(fname),
             unquote(Macro.escape(codec))
           )
-
-        Bendler.Codec.check(
-          Bendler.result(__bendler_send__(frame), unquote(fname)),
-          unquote(Macro.escape(ret_t)),
-          unquote(fname),
-          unquote(Macro.escape(codec))
-        )
+        end)
       end
     end
   end

@@ -3,11 +3,23 @@
 alias Bendler.Test.CompositePort
 
 build =
-  Path.expand(
-    Path.join([Mix.Project.build_path(), "bendler", "bendler", "bendler_test_composite_port"])
-  )
+  Path.expand(Path.join([Bendler.Build.build_scope(:bendler), "bendler_test_composite_port"]))
 
 source = File.read!(Path.join(build, "shim.c"))
+
+# Bend's host evaluator uses preserve_none/preserve_most calling conventions for
+# its musttail machine. Sanitizer instrumentation adds calls and register pressure
+# to those functions; on arm64 Apple clang 21 a preserve_none segment clobbers the
+# caller's spill-frame register, so corpus_eval reloads a null Corpus. Compile an
+# ASan-only copy with the platform ABI. This does not disable instrumentation.
+preserve = "#define PRESERVE(A) __attribute__((A))"
+
+if length(:binary.matches(source, preserve)) != 1 do
+  raise "expected exactly one Bend PRESERVE definition in the emitted C"
+end
+
+asan_source = String.replace(source, preserve, "#define PRESERVE(A)")
+File.write!(Path.join(build, "shim_asan.c"), asan_source)
 
 flags =
   Enum.map(~w(BYTES DU DF DN DS DB DL DK), fn name ->
@@ -26,7 +38,7 @@ args =
     "-fno-omit-frame-pointer",
     "-I.",
     "-DBENDLER_TRANSPORT=\"bendler_port.h\"",
-    "shim.c",
+    "shim_asan.c",
     "-o",
     exe,
     "-lpthread",
@@ -65,9 +77,20 @@ try do
     {{:error, _}, ""} = CompositePort |> Bendler.Port.call(frame) |> Bendler.Codec.decode()
   end
 
-  IO.puts(
-    "ASan: 100 composite round-trip and malformed-frame cycles passed (leak detection disabled)"
-  )
+  # Fuzz only an identity export: random function ids could accidentally
+  # invoke an expensive kernel with valid but adversarial numeric inputs.
+  optional = Enum.find_index(sigs, &(&1.name == "optional"))
+  :rand.seed(:exsss, {19, 27, 42})
+
+  for _ <- 1..500 do
+    payload = for _ <- 1..:rand.uniform(64), into: <<>>, do: <<:rand.uniform(256) - 1>>
+    reply = Bendler.Port.call(CompositePort, <<optional::32, payload::binary>>)
+    {_, ""} = Bendler.Codec.decode(reply)
+  end
+
+  :none = CompositePort.optional(:none)
+
+  IO.puts("ASan: 100 composite cycles and 500 fuzz frames passed (leak detection disabled)")
 after
   GenServer.stop(pid)
 end

@@ -18,6 +18,9 @@ static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF
 #ifndef BENDLER_MAX_ITEMS
 #define BENDLER_MAX_ITEMS (16u << 20)   // list items (all lists together) one request may carry
 #endif
+#ifndef BENDLER_MAX_DECODED
+#define BENDLER_MAX_DECODED (64u << 20) // allocations made while decoding one request
+#endif
 #define BL_MAX_DEPTH 2048                // value nesting limit (a recursive datatype nests per level)
 #define BL_MAX_SPEC_DEPTH 32             // type spec nesting limit (a D<index>: does not expand)
 
@@ -109,9 +112,29 @@ static const char* bl_ctor_fields(int idx, int ctor, int* nfields) {
 // Walks a request against the export's spec without allocating anything.
 // Answers NULL when the request is exactly one well-formed value per
 // parameter, else a message. This is the only gate malformed input meets.
-typedef struct { const u8* p; const u8* end; u64 items; const char* err; } BlCheck;
+typedef struct { const u8* p; const u8* end; u64 items; u64 decoded; const char* err; } BlCheck;
 
-static void bl_check(BlCheck* c, const char** ty, int depth) {
+static void bl_charge(BlCheck* c, u64 n) {
+  if (c->err) return;
+  if (n > BENDLER_MAX_DECODED - c->decoded) { c->err = "decoded memory budget exceeded"; return; }
+  c->decoded += n;
+}
+
+// Bytes use a power-of-two u32 buffer plus the two-word Bytes/DB node.
+// Zero bytes still allocate the runtime's smallest one-word block.
+static void bl_charge_bytes(BlCheck* c, u32 n) {
+  u64 slots = 1;
+  while (slots < n) slots <<= 1;
+  u64 buffer = slots * 4;
+  bl_charge(c, 16 + (buffer < 8 ? 8 : buffer));
+}
+
+static bool bl_spec_has_dyn(const char* p, const char* end) {
+  while (p < end) if (*p++ == 'D') return true;
+  return false;
+}
+
+static void bl_check(BlCheck* c, const char** ty, int depth, bool dyn) {
   if (c->err) return;
   if (depth > BL_MAX_DEPTH) { c->err = "value nested too deep"; return; }
   char k = *(*ty)++;
@@ -123,7 +146,8 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       if (tag != BL_TUPLE || c->p >= c->end || *c->p++ != n) { c->err = "expected a Tuple"; return; }
       c->items += n;
       if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many items"; return; }
-      for (int i = 0; i < n && !c->err; i += 1) bl_check(c, ty, depth + 1);
+      bl_charge(c, dyn ? 8 + (u64)n * 16 : (u64)(n - 1) * 16);
+      for (int i = 0; i < n && !c->err; i += 1) bl_check(c, ty, depth + 1, dyn);
       return;
     }
     case 'D': {
@@ -136,20 +160,24 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       if (k != n) { c->err = "wrong field count for the constructor"; return; }
       c->items += k;
       if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many items"; return; }
-      for (int i = 0; i < k && !c->err; i += 1) bl_check(c, &fs, depth + 1);
+      // Dyn.DK is two words; its fields are a runtime list and a temporary Term array.
+      bl_charge(c, 16 + (u64)k * 24);
+      for (int i = 0; i < k && !c->err; i += 1) bl_check(c, &fs, depth + 1, true);
       return;
     }
     case 'M': {
       const char* end = bl_skip_type(*ty);
-      if (tag == BL_SOME) bl_check(c, ty, depth + 1);
+      bl_charge(c, dyn ? 8 + (tag == BL_SOME ? 16 : 0) : (tag == BL_SOME ? 8 : 0));
+      if (tag == BL_SOME) bl_check(c, ty, depth + 1, dyn);
       else if (tag != BL_NONE) c->err = "expected a Maybe";
       *ty = end; return;
     }
     case 'R': {
       const char* value = bl_skip_type(*ty);
       const char* end = bl_skip_type(value);
-      if (tag == BL_OK) { *ty = value; bl_check(c, ty, depth + 1); }
-      else if (tag == BL_FAIL) bl_check(c, ty, depth + 1);
+      bl_charge(c, dyn ? 32 : 8);
+      if (tag == BL_OK) { *ty = value; bl_check(c, ty, depth + 1, dyn); }
+      else if (tag == BL_FAIL) bl_check(c, ty, depth + 1, dyn);
       else c->err = "expected a Result";
       *ty = end; return;
     }
@@ -161,11 +189,15 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
     case 'n':
       if (tag != BL_NAT || c->end - c->p < 8) { c->err = "expected a Nat"; return; }
       if (bl_rd64(c->p) > NAT_IMM) { c->err = "a Nat past 2^48-1"; return; }
+      if (dyn) bl_charge(c, 8); // Dyn.DN box
       c->p += 8; return;
     case 's': {
       if (tag != BL_STR || c->end - c->p < 4) { c->err = "expected a String"; return; }
       u32 n = bl_rd32(c->p); c->p += 4;
       if ((u64)(c->end - c->p) < n) { c->err = "truncated String"; return; }
+      // io_str allocates one two-word cons per decoded code point. Invalid UTF-8
+      // can produce one replacement code point per byte, so bytes is the safe bound.
+      bl_charge(c, (u64)n * 16 + (dyn ? 8 : 0));
       c->p += n; return;
     }
     case 'b':
@@ -181,6 +213,7 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       u32 n = bl_rd32(c->p); c->p += 4;
       if ((u64)(c->end - c->p) < n) { c->err = "truncated Bytes"; return; }
       if (n > (1u << 30)) { c->err = "Bytes past 2^30"; return; }
+      bl_charge_bytes(c, n);
       c->p += n; return;
     }
     case 'L': {
@@ -193,8 +226,11 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
       if ((u64)n > (u64)(c->end - c->p)) { c->err = "list count past the request"; return; }
       c->items += n;
       if (c->items > BENDLER_MAX_ITEMS) { c->err = "too many list items"; return; }
+      // Both decoders hold an 8-byte Term array while building 16-byte cons
+      // cells. Dyn additionally boxes the completed list in DL.
+      bl_charge(c, (u64)n * 24 + (dyn ? 8 : 0));
       const char* elem = *ty;
-      for (u32 i = 0; i < n && !c->err; i += 1) { const char* t2 = elem; bl_check(c, &t2, depth + 1); }
+      for (u32 i = 0; i < n && !c->err; i += 1) { const char* t2 = elem; bl_check(c, &t2, depth + 1, dyn); }
       *ty = bl_skip_type(elem);
       return;
     }
@@ -204,9 +240,13 @@ static void bl_check(BlCheck* c, const char** ty, int depth) {
 
 // The request body after the function index. fn must already be in range.
 static const char* bl_validate(u32 fn, const u8* p, const u8* end) {
-  BlCheck c = { p, end, 0, NULL };
+  BlCheck c = { p, end, 0, 0, NULL };
   const char* ty = BENDLER_ARG_SPECS[fn];
-  while (*ty && !c.err) bl_check(&c, &ty, 0);
+  while (*ty && !c.err) {
+    const char* type_end = bl_skip_type(ty);
+    bool dyn = bl_spec_has_dyn(ty, type_end);
+    bl_check(&c, &ty, 0, dyn);
+  }
   if (c.err) return c.err;
   if (c.p != end) return "trailing bytes in the request";
   return NULL;

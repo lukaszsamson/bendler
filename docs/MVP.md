@@ -36,29 +36,38 @@ functions. In order:
 - [x] (done) Queue transitions that never strand a request: every outcome
       establishes an in-flight request, drains further, empties the queue
       or stops the owner. Queued callers monitored; total deadlines.
-- [ ] Launcher-owned termination: own the OS process, TERM then KILL on
-      the owner's deadline or death, reap it; tested after a timeout and
-      after the owner dies. Closing the port is not a kill today.
-- [ ] Artifacts isolated by environment and target (`priv/bendler/<env>/`
-      or a build-path priv); concurrent builds tested.
-- [ ] Property and fuzz tests for both codecs: truncation, nesting, frame
-      limits, invalid UTF-8, malformed replies; run the C side under ASan
-      in CI.
-- [ ] Memory budgets, not only counts: a decoded-size budget per request
-      and a sustained-overload test with RSS watched.
+- [x] Launcher-owned termination: POSIX relay owns the process group,
+      TERM then KILL after 200 ms on owner deadline/death, and reaps the
+      worker. Tests include ignored TERM, blocked callers on owner `:kill`,
+      and a worker that exits leaving a descendant holding stdout open.
+- [x] Artifacts isolated by environment and target
+      (`priv/bendler/<target>/<env>/`); concurrent builders serialize with
+      clean under a filesystem lock. A consumer release runs without Bend
+      on PATH. Abandoned locks require manual recovery (see CONTRACTS.md).
+- [x] Property/fuzz tests for both codecs: deterministic truncation,
+      nesting, frame caps, invalid UTF-8 and malformed replies. Local ASan
+      passed 100 composite cycles plus 500 fuzz frames. The checksum-pinned
+      macOS/Linux CI workflow runs it too; remote CI has not yet been run.
+- [x] Decoded-size admission budgets (64 MiB native/host default) and a
+      sustained 2,560-call overload/RSS check. This is not an OS RSS cap;
+      user computations and allocator retention are outside codec budgets.
 - [x] (done) Batched Levenshtein (`the_fuzz` as reference) with differential
       correctness tests and end-to-end benchmarks: `demos/levenshtein/lev.bend`
       (two-row DP over code points, parallel batch), `demos/levenshtein/test/lev_test.exs`
       (all `simetric` and `the_fuzz` cases, Unicode code-point checks,
       batch tests), `demos/levenshtein/bench.exs` (single short pair ~23 µs
       through the port vs ~1 µs in Elixir; 64×43-char batch ~9 µs/pair
-      vs ~40 µs/pair, ~4x parallel gain). Re-measure the hand-off
-      after the admission and deadline changes.
-- [ ] Document the accepted signature subset, the error contract, Unicode
+      vs ~40 µs/pair, ~4x parallel gain). Re-measured after launcher,
+      telemetry and budget checks: short call 48 µs; medium 64-pair batch
+      9.6 µs/pair vs Elixir 37.8 µs/pair. These are local averages, not
+      universal latency claims; batching remains important.
+- [x] Document the accepted signature subset, the error contract, Unicode
       semantics (code points, U+FFFD for invalid bytes) and the platform
-      matrix.
-- [ ] Telemetry: `[:bendler, :call, :start | :stop | :exception]` with
-      module, function, backend, queue depth, wait and run time.
+      matrix in `docs/CONTRACTS.md`.
+- [x] Telemetry: `[:bendler, :call, :start | :stop | :exception]` with
+      module/function/backend and end-to-end duration; Port completions add
+      queue depth, wait and dispatch-to-reply time. NIF wait/run split is
+      deliberately not fabricated. Arguments/results are not emitted.
 
 ## 3. Next, driven by real workloads
 

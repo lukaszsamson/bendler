@@ -143,11 +143,11 @@ test/composite_test.exs test/support/composite.ex 'demos/csv/**/*.{ex,exs}'
 
 `MIX_ENV=test mix run demos/csv/check_asan.exs` passed 100 cycles against an
 AddressSanitizer-instrumented external port, including empty composite lists,
-nested options/Bytes, Result errors and malformed frames. Leak detection is
-disabled because runtime teardown is not validated. This is not NIF sanitizer
-coverage. A combined ASan/UBSan run stopped in generated runtime `root_done`
-(`shim.c:1269`, zero-offset pointer arithmetic on null); the Bend runtime is
-therefore not claimed UBSan-clean. No workaround patches were applied to it.
+nested options/Bytes, Result errors, user datatypes and malformed frames. Leak
+detection is disabled because runtime teardown is not validated. This is not
+NIF sanitizer coverage. A historical combined ASan/UBSan run, before the
+calling-convention diagnosis below, stopped in generated runtime `root_done`;
+it has not been rerun, so the Bend runtime is not claimed UBSan-clean.
 
 Five-sample CPU benchmark results and limitations are in
 `demos/csv/README.md`. NimbleCSV won every measured case. No Linux, streaming,
@@ -204,13 +204,74 @@ introduced into C. Strict Credo and Dialyzer pass.
 
 The ASan harness now defines every Dyn constructor macro and exercises
 records with Bytes/F32/Result, 300-deep recursive values and malformed
-constructor frames. **The expanded current fixture is not ASan-clean:**
-the executable faults during its first Base-composite call, before the Dyn
-cases, in generated `root_done` / `corpus_eval` / `io_step`. ASan reports a
-near-null read at `shim.c:1541`. Reproduced with both O1 and O3; the harness
-retains O1. `handle_segv=2` exposes the ASan diagnostic instead of Bend's
-generic “machine stack overflow?” signal message. This supersedes any
-assumption that the earlier successful ASan run validates the current
-fixture. No generated-runtime patch or sanitizer suppression was applied.
-ASan coverage of Dyn remains blocked pending investigation; normal native
-Port/NIF regressions pass. Leak detection remains disabled.
+constructor frames. The expanded fixture initially faulted during its first
+Base-composite call, before the Dyn cases, in generated `root_done` /
+`corpus_eval` / `io_step`; ASan reported a null read at `shim.c:1541` at both
+O1 and O3. The register dump showed `x19`, used as `corpus_eval`'s spill-frame
+base, clobbered to `0x300000030`; the `Corpus` value reloaded through that bad
+frame was null. Bend's generated host machine marks its tail-called segments
+`preserve_none` and the surrounding cold routines `preserve_most`. With ASan's
+added calls and register pressure, that convention combination is not sound on
+arm64 Apple clang 21. Compiling the same source with conventional platform
+calling conventions made all 100 cycles pass, including the Dyn cases.
+
+`check_asan.exs` now makes a separate `shim_asan.c`, asserts that it changes
+exactly one generated `PRESERVE` definition, and disables those calling-
+convention attributes only in that copy. This is an instrumentation ABI
+compatibility fix, not a sanitizer suppression: `-fsanitize=address` still
+instruments the entire codec and generated runtime, `halt_on_error=1` remains
+set, and the production `shim.c` and artifact are untouched. Leak detection
+remains disabled because runtime teardown is not validated.
+
+## Track 2 integration (2026-09-20)
+
+The ASan fix was rerun against the integrated launcher/scoped-artifact
+build: **100 composite cycles and 500 deterministic fuzz frames passed**.
+The fuzz target is an identity export, not a random expensive kernel.
+Production calling conventions are unchanged; the sanitizer copy uses the
+standard ABI and retains full instrumentation. UBSan and NIF sanitizer
+coverage remain outside this result.
+
+Launcher tests compile a deliberately uncooperative CPU worker. A deadline
+and untrappable owner death both lead to TERM, KILL and worker reaping. A
+blocked caller gets `{:error, :exited}` rather than an exit signal. Another
+fixture exits its group leader but leaves an ignoring descendant holding
+stdout; the launcher observes exit with `waitid(..., WNOWAIT)`, kills the
+group while its leader PID is still reserved, then reaps and drains output.
+That avoids signalling a recycled process-group id or orphaning descendants.
+An external SIGKILL of the launcher itself is not covered.
+
+Codec regressions exercise decoded-memory amplification, both native
+validators, malformed/truncated replies, excessive nesting, oversized frame
+headers and NIF requests, invalid UTF-8 map keys, and successful calls after
+refusal. Generated-call telemetry tests check span pairing, queue/wait/run
+measurements, sanitized exceptions, and preservation of public return values.
+
+`MIX_ENV=test mix run scripts/check_overload.exs` completed 40 waves of 64
+calls (2,560 requests), one worker thread and queue limit four. One run:
+289 accepted / 2,271 busy; worker RSS 2,992 KiB warm baseline, 3,040 KiB
+peak/final; BEAM RSS 91,600 KiB baseline and 104,304 KiB final. RSS sampling
+is observational, includes unrelated VM state and can miss short peaks.
+The script checks retained worker growth against a 128 MiB regression
+threshold; it does not enforce a production memory limit.
+
+After lifecycle/budget/telemetry changes, the existing Levenshtein benchmark
+reported short single calls 48.0 µs (Elixir 1.0), medium single 46.3 µs
+(37.5), medium batch 64: 9.6 µs/pair (37.8). The extra relay has a real
+small-call cost; this is not evidence that NIF lifecycle hazards are worth
+accepting. Values are the script's averages on this macOS arm64 host.
+
+CI has been added for macOS arm64 and Linux x86_64 with Bend 2.0.20 release
+archive SHA-256 pins (from upstream's release-generated flake), OTP 28.0,
+Elixir 1.20.3 and locked dependencies. No remote CI run was performed here;
+Linux results and runner/toolchain compatibility are still pending.
+
+Final local checks: **106 tests passed** with warnings as errors, formatting,
+strict Credo, Dialyzer (zero errors), and documentation generation passed.
+The release-consumer smoke test also passed: two native builders publish the
+same artifact under a lock; consumer clean removes only host/prod artifacts,
+preserves another target/environment sentinel, and ordinary compile rebuilds
+the worker and launcher. The resulting release returns 42 with Bend absent
+from PATH. The simultaneous-builder assertion is a separate ExUnit test;
+it does not claim that all of Mix's own compiler state supports concurrent
+OS invocations. A dead build's lock is deliberately not auto-reclaimed.

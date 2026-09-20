@@ -15,8 +15,9 @@ defmodule Bendler.Port do
   code}}`. A well-framed but invalid request is answered with an error
   frame and the worker goes on.
 
-  Closing the port is not a hard kill: a worker in the middle of a long
-  computation exits when it next writes to the closed pipe.
+  A native launcher owns the worker process group. Closing the port (also
+  when this owner is killed) makes the launcher send TERM, then KILL after
+  200 ms, and reap the worker. This does not depend on worker cooperation.
   """
   use GenServer
   require Logger
@@ -30,24 +31,31 @@ defmodule Bendler.Port do
   @doc "Sends a request frame and waits for the reply frame, or an error tuple."
   @spec call(GenServer.server(), binary) :: binary | {:error, :busy | :timeout | :exited}
   def call(server, frame) do
-    GenServer.call(server, {:call, frame}, :infinity)
+    case GenServer.call(server, {:call, frame}, :infinity) do
+      {:bendler_reply, reply, measurements} ->
+        Bendler.Telemetry.record(measurements)
+        reply
+
+      reply ->
+        reply
+    end
   catch
-    :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] -> {:error, :exited}
-    :exit, {{:shutdown, _}, _} -> {:error, :exited}
+    :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
   end
 
   @impl true
   def init(opts) do
     exe = Keyword.fetch!(opts, :exe)
+    launcher = Keyword.get(opts, :launcher, Path.join(Path.dirname(exe), "bendler_launcher"))
     threads = Keyword.get(opts, :threads, System.schedulers_online())
     Process.flag(:trap_exit, true)
 
     port =
-      Port.open({:spawn_executable, exe}, [
+      Port.open({:spawn_executable, launcher}, [
         :binary,
         :exit_status,
         {:packet, 4},
-        args: ["--threads", Integer.to_string(threads), "--gpu", "off"]
+        args: [exe, "--threads", Integer.to_string(threads), "--gpu", "off"]
       ])
 
     {:ok,
@@ -65,7 +73,7 @@ defmodule Bendler.Port do
   @impl true
   def handle_call({:call, _}, _from, %{queued: n, max_queue: max, inflight: inflight} = s)
       when inflight != nil and n >= max do
-    {:reply, {:error, :busy}, s}
+    {:reply, {:bendler_reply, {:error, :busy}, %{queue_depth: n, wait_time: 0, run_time: 0}}, s}
   end
 
   def handle_call({:call, frame}, {pid, _} = from, s) do
@@ -73,6 +81,9 @@ defmodule Bendler.Port do
       frame: frame,
       from: from,
       monitor: Process.monitor(pid),
+      admitted: System.monotonic_time(),
+      dispatched: nil,
+      queue_depth: s.queued,
       timer: start_timer(s.timeout, from)
     }
 
@@ -93,7 +104,7 @@ defmodule Bendler.Port do
   defp dispatch(req, s) do
     case send_frame(s.port, req.frame) do
       :ok ->
-        {:noreply, %{s | inflight: req}}
+        {:noreply, %{s | inflight: %{req | dispatched: System.monotonic_time()}}}
 
       :busy ->
         finish(req, {:error, :busy})
@@ -121,7 +132,16 @@ defmodule Bendler.Port do
   defp finish(req, reply) do
     _ = cancel(req.timer)
     _ = Process.demonitor(req.monitor, [:flush])
-    GenServer.reply(req.from, reply)
+    now = System.monotonic_time()
+    dispatched = req.dispatched || now
+
+    measurements = %{
+      queue_depth: req.queue_depth,
+      wait_time: dispatched - req.admitted,
+      run_time: now - dispatched
+    }
+
+    GenServer.reply(req.from, {:bendler_reply, reply, measurements})
   end
 
   @impl true

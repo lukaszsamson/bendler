@@ -103,11 +103,13 @@ that cost, but this benchmark does not establish it.
 ## Safety checks
 
 Current status after the user-datatype extension: the expanded ASan harness
-faults in generated runtime `root_done` before reaching its new Dyn tests
-(at both O1 and O3). See `docs/VALIDATION.md` in the repository root. The
-earlier successful codec run below is historical, not a passing result for
-the current fixture. The command remains a failing reproducer; no sanitizer
-finding is suppressed.
+passes its Base-composite, Dyn and malformed-frame cases. The earlier
+`root_done` failure was an instrumentation/ABI incompatibility in generated
+Bend C: an ASan-instrumented `preserve_none` machine segment clobbered the
+arm64 register holding `corpus_eval`'s spill-frame address, from which its
+`Corpus` argument was then reloaded as null. The harness compiles a separate
+`shim_asan.c` with Bend's `PRESERVE` attributes disabled, using the platform
+ABI; ASan remains enabled across the codec and runtime.
 
 Tests compare fixed cases, all 781 strings of length 0–4 over quote/comma/CR/LF/a,
 and 40 deterministic generated tables against
@@ -116,8 +118,8 @@ exercise both native backends, nested empty values and malformed frames.
 `check_asan.exs` instruments an external port only, never a loaded NIF; it
 checks 100 composite/malformed-request cycles with leak detection disabled.
 
-A separate combined AddressSanitizer/UndefinedBehaviorSanitizer attempt
-stopped in generated Bend runtime `root_done` with “applying zero offset to
-null pointer” (`shim.c:1269`). Thus this work does **not** claim a UBSan-clean
-Bend runtime or sanitizer coverage of an in-process NIF. The ASan-only
-command is retained for reproducible codec checks.
+A historical combined AddressSanitizer/UndefinedBehaviorSanitizer attempt,
+before the calling-convention diagnosis, stopped in generated Bend runtime
+`root_done` with “applying zero offset to null pointer” (`shim.c:1269`). It
+has not been rerun with the compatibility fix, so this work does **not** claim
+a UBSan-clean Bend runtime or sanitizer coverage of an in-process NIF.

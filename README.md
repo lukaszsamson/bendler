@@ -108,7 +108,7 @@ Bend side. A user datatype crosses as the prelude's `Dyn` tree, converted
 by defs the build generates into the shim, so `type Shape is Data:` with
 `Circle{r: U32}` and `Dot{}` takes `{:circle, 3}` and `:dot`; recursive
 types (a tree, a linked list) work, with the rules in `Bendler.Sig`. See
-[type contracts](docs/TYPES.md) for nesting limits, parentheses, the float
+[type contracts](docs/TYPES.md) and [the accepted contract subset](docs/CONTRACTS.md) for nesting limits, parentheses, the float
 policy, the datatype rules and the distinction between Result failures
 (data) and transport exceptions.
 
@@ -169,13 +169,15 @@ never has to know the layout of a user constructor.
 - **One request at a time per module.** The shim's loop is sequential;
   admission is bounded (`max_queue`, `max_waiting`) and the rest are told
   `:busy` at once. Inside a call, Bend still uses every core.
-- **Latency is ~10 µs per call on either backend** (thread hand-off). The
-  NIF form does not yet beat the port form; see the research notes.
-- **Cancellation does not exist.** A timed-out request keeps running in the
-  runtime. The port owner closes the port and stops, but closing a port is
-  not a hard kill: the worker exits when it next writes to the closed pipe
-  (that is the "stdout write failed" line on stderr). The NIF runtime just
-  finishes the work and its reply is dropped.
+- **Batch small calls.** With the launcher, telemetry and codec budgets,
+  a short Levenshtein port call averaged 48 µs locally. A 64-pair medium
+  batch averaged 9.6 µs/pair versus Elixir's 37.8 µs/pair. Earlier ~10 µs
+  transport-only measurements are not current end-to-end latency promises.
+- **Port deadlines stop the worker.** The owner closes the port and stops;
+  a separate POSIX launcher sends TERM to the worker process group, then
+  KILL after 200 ms, and reaps the child. Owner death is covered too. This
+  discards the whole worker, not just one computation. NIF cancellation
+  still does not exist: the computation finishes and its reply is dropped.
 - **A Bend runtime error freezes that module's NIF runtime**: the runtime's
   `_exit` is routed to `bendler_die`, so later calls raise `Bendler.Error`
   with reason `:dead` instead of taking the VM down. The frozen runtime keeps
@@ -201,11 +203,12 @@ never has to know the layout of a user constructor.
   to the runtime: the NIF does it on the calling thread and answers
   `:refused`; the port worker answers an error frame and goes on. Frames
   are capped at 64 MiB (`-DBENDLER_MAX_FRAME`), list items per request at
-  16M (`-DBENDLER_MAX_ITEMS`), nesting at 32. Replies are checked against
-  the declared return type on the Elixir side too.
-- **`priv/bendler/` is shared across Mix environments** when the project
-  has a `priv/` directory (Mix symlinks it), so `test` and `dev` builds of
-  the same module overwrite each other's artifact.
+  16M (`-DBENDLER_MAX_ITEMS`), type-spec nesting at 32 and value nesting
+  at 2048. Decoded allocation admission defaults to 64 MiB; this is not
+  an OS RSS cap. Replies are checked against the declared return type too.
+- **Artifacts use `priv/bendler/<target>/<env>/`** despite Mix's shared
+  priv symlink. Build and clean share a filesystem lock; abandoned locks
+  require manual recovery after verifying that the owning build has died.
 - Each NIF module reserves 8 GiB of virtual address space (the runtime's
   heap arena, `MAP_NORESERVE`) plus 2 GiB of virtual stack per worker thread.
 - `Nat` values are limited to `2^48-1`; the codec rejects larger integers.

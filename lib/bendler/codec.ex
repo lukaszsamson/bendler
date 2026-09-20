@@ -29,6 +29,7 @@ defmodule Bendler.Codec do
   @typedoc "Per user datatype, each constructor's atom and field types, in order."
   @type types :: %{String.t() => [{atom, [type]}]}
   @max_depth 2048
+  @max_decoded 64 * 1024 * 1024
 
   @nat_max Integer.pow(2, 48) - 1
   # doubles below this round to a finite single; the midpoint to the next one
@@ -42,6 +43,7 @@ defmodule Bendler.Codec do
   @doc "A request frame: the function index, then each argument beside its type."
   @spec request(non_neg_integer, [{term, type}], types) :: binary
   def request(index, args, types \\ %{}) when is_integer(index) do
+    ensure_request_budget!(args, types)
     <<index::32>> <> Enum.map_join(args, fn {v, t} -> encode(v, t, types) end)
   end
 
@@ -115,6 +117,109 @@ defmodule Bendler.Codec do
   defp encode_all(vs, ts, types),
     do: Enum.zip(vs, ts) |> Enum.map_join(fn {x, t} -> encode(x, t, types) end)
 
+  # Mirror the runtime decoder's concrete allocations before constructing the
+  # wire frame. A type containing a user datatype is decoded through Dyn as a
+  # whole, so its enclosing tuples/lists carry Dyn overhead too.
+  defp ensure_request_budget!(args, types) do
+    _ =
+      Enum.reduce(args, 0, fn {value, type}, used ->
+        request_size(value, type, types, has_data?(type), used, 0)
+      end)
+
+    :ok
+  end
+
+  defp request_size(_, _, _, _, _, depth) when depth > @max_depth,
+    do: raise(ArgumentError, "request nested too deep")
+
+  defp request_size(v, :nat, _, true, used, _) when is_integer(v), do: request_charge!(used, 8)
+
+  defp request_size(v, :string, _, dyn, used, _) when is_binary(v),
+    do: request_charge!(used, byte_size(v) * 16 + if(dyn, do: 8, else: 0))
+
+  defp request_size(v, :bytes, _, _, used, _) when is_binary(v) do
+    slots = next_power_of_two(max(byte_size(v), 1))
+    request_charge!(used, 16 + max(slots * 4, 8))
+  end
+
+  defp request_size(v, {:list, type}, types, dyn, used, depth) when is_list(v) do
+    used = request_charge!(used, length(v) * 24 + if(dyn, do: 8, else: 0))
+    Enum.reduce(v, used, &request_size(&1, type, types, dyn, &2, depth + 1))
+  end
+
+  defp request_size(v, {:map, type}, types, _, used, depth) when is_map(v) do
+    used = request_charge!(used, map_size(v) * 40)
+
+    Enum.reduce(v, used, fn {key, value}, acc ->
+      acc =
+        if is_binary(key),
+          do: request_charge!(acc, byte_size(key) * 16),
+          else: acc
+
+      request_size(value, type, types, false, acc, depth + 2)
+    end)
+  end
+
+  defp request_size(v, {:tuple, field_types}, types, dyn, used, depth)
+       when is_tuple(v) and tuple_size(v) == length(field_types) do
+    n = length(field_types)
+    used = request_charge!(used, if(dyn, do: 8 + n * 16, else: (n - 1) * 16))
+
+    Enum.zip(Tuple.to_list(v), field_types)
+    |> Enum.reduce(used, fn {value, type}, acc ->
+      request_size(value, type, types, dyn, acc, depth + 1)
+    end)
+  end
+
+  defp request_size(:none, {:maybe, _}, _, dyn, used, _),
+    do: request_charge!(used, if(dyn, do: 8, else: 0))
+
+  defp request_size({:some, value}, {:maybe, type}, types, dyn, used, depth) do
+    used = request_charge!(used, if(dyn, do: 24, else: 8))
+    request_size(value, type, types, dyn, used, depth + 1)
+  end
+
+  defp request_size({tag, value}, {:result, error, ok}, types, dyn, used, depth)
+       when tag in [:ok, :error] do
+    used = request_charge!(used, if(dyn, do: 32, else: 8))
+    request_size(value, if(tag == :ok, do: ok, else: error), types, dyn, used, depth + 1)
+  end
+
+  defp request_size(value, {:data, name}, types, _, used, depth)
+       when is_atom(value) or (is_tuple(value) and tuple_size(value) > 1) do
+    {tag, fields} = if is_atom(value), do: {value, []}, else: List.pop_at(Tuple.to_list(value), 0)
+
+    case Enum.find(Map.get(types, name, []), fn {atom, _} -> atom == tag end) do
+      {_, field_types} when length(field_types) == length(fields) ->
+        used = request_charge!(used, 16 + length(fields) * 24)
+
+        Enum.zip(fields, field_types)
+        |> Enum.reduce(used, fn {field, type}, acc ->
+          request_size(field, type, types, true, acc, depth + 1)
+        end)
+
+      _ ->
+        used
+    end
+  end
+
+  defp request_size(_, _, _, _, used, _), do: used
+
+  defp request_charge!(used, amount) when amount <= @max_decoded - used, do: used + amount
+  defp request_charge!(_, _), do: raise(ArgumentError, "request decoded memory budget exceeded")
+
+  defp next_power_of_two(n), do: next_power_of_two(n, 1)
+  defp next_power_of_two(n, power) when power >= n, do: power
+  defp next_power_of_two(n, power), do: next_power_of_two(n, power * 2)
+
+  defp has_data?({:data, _}), do: true
+  defp has_data?({:list, type}), do: has_data?(type)
+  defp has_data?({:map, type}), do: has_data?(type)
+  defp has_data?({:tuple, types}), do: Enum.any?(types, &has_data?/1)
+  defp has_data?({:maybe, type}), do: has_data?(type)
+  defp has_data?({:result, error, ok}), do: has_data?(error) or has_data?(ok)
+  defp has_data?(_), do: false
+
   @doc "The value a reply frame holds; raises Bendler.Error on the error tag."
   @spec reply(binary, atom) :: term
   def reply(bin, fun \\ :call)
@@ -134,7 +239,7 @@ defmodule Bendler.Codec do
         v
 
       {_, rest} ->
-        raise Bendler.Error, message: "#{fun}: trailing bytes in a reply: #{inspect(rest)}"
+        raise Bendler.Error, message: "#{fun}: #{byte_size(rest)} trailing bytes in a reply"
     end
   end
 
@@ -216,7 +321,58 @@ defmodule Bendler.Codec do
 
   @doc "Decodes one value, returning it beside the rest of the binary."
   @spec decode(binary) :: {term, binary}
-  def decode(bin), do: decode_value(bin, 0)
+  def decode(bin) do
+    _ = scan_value(bin, 0, 0)
+    decode_value(bin, 0)
+  end
+
+  # Validate and account a reply before decode_items allocates its placeholder
+  # and result lists. This scanner intentionally builds no terms from the wire.
+  defp scan_value(_, depth, _) when depth > @max_depth,
+    do: raise(Bendler.Error, "reply nested too deep")
+
+  defp scan_value(<<0, n::32, _::binary-size(n), r::binary>>, 0, used),
+    do: {r, charge!(used, n + 64)}
+
+  defp scan_value(<<tag, _::binary-size(4), r::binary>>, _, used) when tag in [1, 14],
+    do: {r, used}
+
+  defp scan_value(<<2, v::64, r::binary>>, _, used) when v <= @nat_max, do: {r, used}
+
+  defp scan_value(<<tag, n::32, _::binary-size(n), r::binary>>, _, used) when tag in [3, 7],
+    do: {r, charge!(used, n + 64)}
+
+  defp scan_value(<<4, b, r::binary>>, _, used) when b in [0, 1], do: {r, used}
+  defp scan_value(<<5, r::binary>>, _, used), do: {r, used}
+  defp scan_value(<<13, _::32, r::binary>>, _, used), do: {r, charge!(used, 16)}
+  defp scan_value(<<9, r::binary>>, _, used), do: {r, used}
+
+  # decode_items allocates a 16-byte/element placeholder list and result list;
+  # List.to_tuple then allocates n + 1 words while the result list is retained.
+  defp scan_value(<<8, n, r::binary>>, d, used) when n in 2..16 and n <= byte_size(r),
+    do: scan_items(n, r, d, charge!(used, n * 40 + 8))
+
+  defp scan_value(<<15, _ctor, n, r::binary>>, d, used) when n <= byte_size(r),
+    do: scan_items(n, r, d, charge!(used, n * 32 + 32))
+
+  defp scan_value(<<tag, r::binary>>, d, used) when tag in [10, 11, 12] do
+    scan_value(r, d + 1, charge!(used, 24))
+  end
+
+  defp scan_value(<<6, n::32, r::binary>>, d, used) when n <= byte_size(r),
+    do: scan_items(n, r, d, charge!(used, n * 32))
+
+  defp scan_value(_, _, _), do: raise(Bendler.Error, "malformed reply")
+
+  defp scan_items(0, rest, _, used), do: {rest, used}
+
+  defp scan_items(n, bin, depth, used) do
+    {rest, used} = scan_value(bin, depth + 1, used)
+    scan_items(n - 1, rest, depth, used)
+  end
+
+  defp charge!(used, amount) when amount <= @max_decoded - used, do: used + amount
+  defp charge!(_, _), do: raise(Bendler.Error, "reply decoded memory budget exceeded")
 
   defp decode_value(_, depth) when depth > @max_depth,
     do: raise(Bendler.Error, "reply nested too deep")

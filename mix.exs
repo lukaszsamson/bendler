@@ -11,6 +11,7 @@ defmodule Bendler.MixProject do
       elixir: "~> 1.16",
       elixirc_paths: elixirc_paths(Mix.env()),
       test_paths: ["test"] ++ Path.wildcard("demos/*/test"),
+      test_ignore_filters: [~r{test/(support|fixtures)/}],
       compilers: Mix.compilers() ++ [:bendler],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -34,6 +35,7 @@ defmodule Bendler.MixProject do
 
   defp deps do
     [
+      {:telemetry, "~> 1.3"},
       {:nimble_csv, "== 1.3.0", only: :test, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
@@ -60,6 +62,8 @@ defmodule Bendler.MixProject do
         "docs/VALIDATION.md",
         "docs/BEAM_API.md",
         "docs/TYPES.md",
+        "docs/CONTRACTS.md",
+        "docs/TRACK2.md",
         "docs/MVP.md"
       ]
     ]

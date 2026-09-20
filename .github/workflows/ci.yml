@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            bend_target: darwin-arm64
+            bend_sha256: e8da8e28ea963e4d3956b4ab80f1c1df9a8c5208dbd6ef1e3e49bb913ed0f374
+          - os: ubuntu-24.04
+            bend_target: linux-x64
+            bend_sha256: dca589832e1645500ad258d27171ed6b5a30812bcc3088c9aedf437059be41e1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28.0'
+          elixir-version: '1.20.3'
+          version-type: strict
+
+      - name: Install pinned Bend 2.0.20
+        env:
+          BEND_TARGET: ${{ matrix.bend_target }}
+          BEND_SHA256: ${{ matrix.bend_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="bend-2.0.20-${BEND_TARGET}.tar.gz"
+          curl --fail --location --retry 3 \
+            "https://github.com/bendlang/bend/releases/download/v2.0.20/${archive}" \
+            --output "${archive}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            printf '%s  %s\n' "${BEND_SHA256}" "${archive}" | sha256sum --check --status -
+          else
+            printf '%s  %s\n' "${BEND_SHA256}" "${archive}" | shasum -a 256 --check --status
+          fi
+          mkdir -p "${RUNNER_TEMP}/bend"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/bend"
+          echo "${RUNNER_TEMP}/bend/bin" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/bend/bin/bend" version
+
+      - name: Install locked dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Compile with warnings as errors
+        run: MIX_ENV=test mix compile --warnings-as-errors
+
+      - name: Test
+        run: mix test --warnings-as-errors
+
+      - name: Strict Credo
+        run: mix credo --strict
+
+      - name: Dialyzer
+        run: mix dialyzer
+
+      - name: Documentation
+        run: mix docs --warnings-as-errors
+
+      - name: AddressSanitizer port check
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:handle_segv=2
+        run: MIX_ENV=test mix run demos/csv/check_asan.exs
+
+      - name: Sustained overload and RSS observation
+        run: MIX_ENV=test mix run scripts/check_overload.exs
+
+      - name: Compiler-free consumer release
+        run: sh test/release_smoke.sh
