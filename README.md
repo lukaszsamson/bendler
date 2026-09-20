@@ -225,6 +225,10 @@ tree-bitonic sorting with `Enum.sort` and `MapSet`, including list round-trip
 costs and cases where more Bend workers make performance worse.
 The [small CSV parser](demos/csv/README.md) uses tuples, Maybe and Result,
 with byte-preserving fields and differential tests against NimbleCSV.
+The [raytracer](demos/raytrace/README.md) takes its whole scene as user
+datatypes and answers packed RGB `Bytes`, with parallel tiles, an
+Elixir-owned tile schedule and deadline, a PNG writer, and a bit-exact
+upstream checksum beside the F32-against-doubles comparison.
 
 ```
 lib/bendler.ex          use Bendler: builds at compile time, defines the functions

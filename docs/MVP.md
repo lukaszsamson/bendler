@@ -169,6 +169,30 @@ small interface, and where Bend's parallelism can show. In order:
    NimbleCSV wins: plain 5.7 vs 28.4 ms, quoted 35.2 vs 98.1 ms. No additional
    user-datatype converter was needed: private parser state stays in Bend.
 
+7. **A raytracer whose scene is a user datatype** (done: `demos/raytrace/`),
+   the first port whose arguments are `type ... is Data` values: a `Scene`
+   of `Sphere{center: Vec, radius, color: Vec, mirror}` crosses in and
+   0.88 MiB of packed RGB `B.Bytes` comes back, with `render_tiles`
+   forking the tiles and each tile forking its rows. Bend's own
+   `bench/runtime/raytrace` float kernel is kept verbatim as
+   `upstream_checksum`, whose `(6, 80)`, `(3, 40)` and `(7, 123)` answers
+   (402971, 19281, 1245125) are pinned bit-exactly; an independent Elixir
+   reference in doubles differs on 0.16% of channels, mean 0.0029, worst
+   6/255, on silhouettes and shadow edges. On M2 Pro, 640x480: Bend Port
+   162.6 / 56.5 / 40.2 ms with 1 / 4 / 12 threads, against about 2 s for
+   the Elixir reference (measured 127.2 ms at 160x120 against Bend's
+   3.6 ms, 35x). The same image with no spheres at all still takes
+   24.4 ms, so roughly 60% of a render is building and moving the pixel
+   buffer, not tracing: the serial tail is why scaling stops at 4.0x.
+   Elixir wins two things: one whole-image call beats tiling by 20-30%,
+   and handing Bend many coarse tiles at once makes it slower (batch 4 is
+   53 ms where batch 16 is 125 ms). Three library frictions found: a
+   multi-line def signature is silently unexportable, the generated
+   `@type` per datatype collides with a hand-written one, and a tuple is
+   `Type`-kinded so it cannot sit in a `List<&2, _>`. No codec change was
+   needed. `:timeout` is demonstrated end to end (the owner stops, the
+   supervisor replaces it, the next call works).
+
 Data interoperability comes before more of the BEAM C API: keep
 processes, ETS, supervision and IO in Elixir; add `F32` and buffers when a
 kernel needs them; defer arbitrary terms, callbacks and native resources
