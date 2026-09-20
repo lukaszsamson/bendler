@@ -78,6 +78,7 @@ target, OTP). A release ships the artifact and does not need `bend`.
 | `timeout` | milliseconds a call may wait (default `:infinity`); port: the owner closes the port and stops, a supervisor restarts it; NIF: the caller gives up, the reply is discarded when it comes |
 | `max_queue` | port: callers allowed to wait behind the one in flight (default 8) |
 | `max_waiting` | NIF: callers admitted at once, waiting or in flight (default 4), each on a dirty scheduler thread |
+| `gpu` | port: where `!` calls run: `:off` (default, the CPU pool), `:on`, or a heap cap like `"4GB"`; a program with `!` is built with its GPU lane and ships `<name>.gpu` beside the executable |
 
 The port module has `start_link/1` and `child_spec/1`; options given there
 override the module's. Put it under a supervisor before calling it.
@@ -209,8 +210,10 @@ never has to know the layout of a user constructor.
 - Each NIF module reserves 8 GiB of virtual address space (the runtime's
   heap arena, `MAP_NORESERVE`) plus 2 GiB of virtual stack per worker thread.
 - `Nat` values are limited to `2^48-1`; the codec rejects larger integers.
-- The GPU lane (`f!(x)`) is untested from the BEAM; the shim builds a CPU
-  program (`BANGS 0` unless your code uses `!`).
+- The GPU lane (`f!(x)`) works through a port (Metal on macOS, CUDA on
+  Linux when installed) and is off unless `gpu:` says otherwise; a NIF
+  runs `!` on the CPU pool. Whether it is faster is the kernel's shape,
+  not a flag: see the ray tracer demo's GPU section.
 - The C side depends on runtime internals (`io_eff`, `io_str`, `ctr_take`,
   ...). Bend promises no ABI: rebuild on every Bend update (the build hash
   includes the `bend version`).

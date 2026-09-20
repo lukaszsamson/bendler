@@ -33,6 +33,12 @@ defmodule Bendler do
       dirty schedulers)
     * `:threads` - CPU threads for the Bend runtime, 1..128 (default: the
       schedulers online)
+    * `:gpu` - port only: where `!` calls run. `:off` (default) keeps them
+      on the CPU pool; `:on` requires a GPU (the port exits at start
+      without one); a size like `"4GB"` caps the GPU's heap. A program
+      with `!` calls is built with its GPU lane (Metal on macOS, CUDA on
+      Linux when installed) and ships its device program as `<name>.gpu`
+      beside the executable. A NIF always runs `!` on the CPU pool.
     * `:exports` - the defs to export (default: every exportable def)
     * `:timeout` - milliseconds a call may wait in total (default
       `:infinity`). Port: the owner closes the port and stops, a supervisor
@@ -112,6 +118,7 @@ defmodule Bendler do
     timeout = Keyword.get(opts, :timeout, :infinity)
     max_queue = Keyword.get(opts, :max_queue, 8)
     max_waiting = Keyword.get(opts, :max_waiting, 4)
+    gpu = Keyword.get(opts, :gpu, :off)
 
     check = fn ok, msg ->
       ok || raise(ArgumentError, "use Bendler in #{inspect(module)}: #{msg}")
@@ -128,6 +135,9 @@ defmodule Bendler do
     check.(is_integer(max_queue) and max_queue >= 0, "max_queue must be a non-negative integer")
     check.(is_integer(max_waiting) and max_waiting >= 1, "max_waiting must be at least 1")
 
+    check.(gpu_option?(gpu), "gpu must be :off, :on or a size like \"4GB\"")
+    check.(backend == :port or gpu == :off, "gpu applies to the :port backend only")
+
     %{
       otp_app: Keyword.fetch!(opts, :otp_app),
       source: Path.expand(Keyword.fetch!(opts, :source), File.cwd!()),
@@ -136,9 +146,13 @@ defmodule Bendler do
       timeout: timeout,
       max_queue: max_queue,
       max_waiting: max_waiting,
+      gpu: gpu,
       exports: Keyword.get(opts, :exports)
     }
   end
+
+  defp gpu_option?(gpu),
+    do: gpu in [:off, :on] or (is_binary(gpu) and Regex.match?(~r/^\d+[KMG]B$/, gpu))
 
   @doc false
   def loader(%{backend: :nif} = cfg, name) do
@@ -183,7 +197,8 @@ defmodule Bendler do
               exe: exe,
               threads: unquote(cfg.threads),
               timeout: unquote(cfg.timeout),
-              max_queue: unquote(cfg.max_queue)
+              max_queue: unquote(cfg.max_queue),
+              gpu: unquote(cfg.gpu)
             ],
             opts
           )

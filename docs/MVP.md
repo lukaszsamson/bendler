@@ -101,7 +101,9 @@ Outside the MVP promise; `BEAM_API.md` has the API specifics.
 
 ## 5. Deferred
 
-GPU builds, the direct-call compiler patch (the real NIF speed-up; upstream
+GPU-shaped kernels (the lane itself builds and runs through a port; the
+ray tracer demo shows why a scene-as-list kernel does not gain from it),
+the direct-call compiler patch (the real NIF speed-up; upstream
 WONTFIX #813 is the hook), an inline `~B` sigil, arbitrary BEAM effects
 from Bend, and more than one request in flight (`IO.fork` alone is not
 enough while the codec's cursor is global).
@@ -169,7 +171,16 @@ small interface, and where Bend's parallelism can show. In order:
    NimbleCSV wins: plain 5.7 vs 28.4 ms, quoted 35.2 vs 98.1 ms. No additional
    user-datatype converter was needed: private parser state stays in Bend.
 
-7. **A raytracer whose scene is a user datatype** (done: `demos/raytrace/`),
+7. **A raytracer whose scene is a user datatype** (done: `demos/raytrace/`;
+   GPU lane added since: the port builds with Bend's Metal lane and ships
+   `<exe>.gpu`, `gpu: :on` runs the `!` defs on the device, the upstream
+   kernel bit-exact and 78 vs 88 ms at 2^10 x 1600, but this demo's
+   list-of-spheres renderer is 50x slower per pixel on the device (62 ms
+   at best for 640x480 against 27 ms on the CPU pool), a spine of forks
+   under a bang segfaults the runtime (reduced and reported as
+   bendlang/bend#918; a balanced tree fixes it and halves the CPU time
+   too) and a 1920x1200 bang trips the macOS GPU watchdog: a GPU-fast
+   kernel is a different shape, bendlang/bend#828),
    the first port whose arguments are `type ... is Data` values: a `Scene`
    of `Sphere{center: Vec, radius, color: Vec, mirror}` crosses in and
    0.88 MiB of packed RGB `B.Bytes` comes back, with `render_tiles`
@@ -179,14 +190,14 @@ small interface, and where Bend's parallelism can show. In order:
    (402971, 19281, 1245125) are pinned bit-exactly; an independent Elixir
    reference in doubles differs on 0.16% of channels, mean 0.0029, worst
    6/255, on silhouettes and shadow edges. On M2 Pro, 640x480: Bend Port
-   162.6 / 56.5 / 40.2 ms with 1 / 4 / 12 threads, against about 2 s for
-   the Elixir reference (measured 127.2 ms at 160x120 against Bend's
-   3.6 ms, 35x). The same image with no spheres at all still takes
-   24.4 ms, so roughly 60% of a render is building and moving the pixel
-   buffer, not tracing: the serial tail is why scaling stops at 4.0x.
-   Elixir wins two things: one whole-image call beats tiling by 20-30%,
-   and handing Bend many coarse tiles at once makes it slower (batch 4 is
-   53 ms where batch 16 is 125 ms). Three library frictions found: a
+   136 / 39 / 27 ms with 1 / 4 / 12 threads (1920x1200: 1088 / 345 /
+   233 ms), against about 2 s for the Elixir reference (measured
+   127.2 ms at 160x120 against Bend's 3.6 ms, 35x). The same image with
+   no spheres at all still took 24 ms of the first version's 40, so a
+   large share of a render is building and moving the pixel buffer, not
+   tracing: the serial tail is why scaling stops at 5x. The first version
+   forked tiles as a spine and got slower with bigger batches; the
+   balanced tree makes batch size free. Three library frictions found: a
    multi-line def signature is silently unexportable, the generated
    `@type` per datatype collides with a hand-written one, and a tuple is
    `Type`-kinded so it cannot sit in a `List<&2, _>`. No codec change was

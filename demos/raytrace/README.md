@@ -64,7 +64,7 @@ scene =
     RaytracePort.vec(0.08, 0.16, 0.32)
   )
 
-{640, 480, rgb} = RaytracePort.render(scene, 640, 480, tile: 64, batch: 4)
+{640, 480, rgb} = RaytracePort.render(scene, 640, 480, tile: 64, batch: 16)
 RaytracePort.save_png("/tmp/scene.png", scene, 320, 240)
 
 # progressively, as the tiles arrive
@@ -72,7 +72,8 @@ scene |> RaytracePort.stream(640, 480) |> Enum.each(fn {tile, bytes} -> show(til
 ```
 
 `render/4` takes `:tile` (edge in pixels, default 64), `:batch` (tiles per
-Bend call, default 4) and `:on_tile` (a callback per tile). `save_png/5`
+Bend call, default 16), `:lane` (`:cpu` or `:gpu`) and `:on_tile` (a
+callback per tile). `save_png/5`
 writes the result through `lib/png.ex`, forty lines of `:zlib` over
 truecolour scanlines. `render_checked/7` answers a `Result`, so a tile
 outside the image comes back as `{:error, "tile out of the image, or
@@ -86,12 +87,21 @@ time, nothing else running. Every Port row includes encoding the scene,
 the hand-off, the render and decoding the pixels; the tiled rows also
 include Elixir reassembling the image.
 
-Default scene (six spheres), 640x480, 0.88 MiB of pixels out:
+Default scene (six spheres), 64-pixel tiles, 16 per call, 0.88 MiB of
+pixels out at 640x480 and 6.9 MiB at 1920x1200:
 
 | | 1 thread | 4 threads | 12 threads |
 |---|---:|---:|---:|
-| whole image in one call | 162.6 ms | 56.5 ms | 40.2 ms |
-| tiled, 64 px, 4 tiles per call | 157.9 ms | 66.8 ms | 51.5 ms |
+| 640x480 | 136 ms | 39 ms | 27 ms |
+| 1920x1200 | 1088 ms | 345 ms | 233 ms |
+
+The first version of the demo forked the tiles of a call as a spine
+(`a b = tile(x) go(rest)`) and measured 40 ms for 640x480 on 12
+threads, with batches past four getting slower (batch 16: 125 ms). The
+balanced fork tree that the GPU lane needed (below) also halves the
+CPU time: with it a bigger batch costs nothing, and a whole image in one
+call is as fast as any split, so the default batch is 16 and the choice
+is about progressive delivery and deadlines, not speed.
 
 Same renderer, 160x120, 12 threads:
 
@@ -101,37 +111,24 @@ Same renderer, 160x120, 12 threads:
 | Elixir reference (doubles) | 127.2 ms |
 
 so about **35x** at the same image, and 640x480 in Elixir would be around
-two seconds against Bend's 40 ms.
+two seconds against Bend's 27 ms.
 
 Transfer and hand-off:
 
 | | median |
 |---|---:|
 | `render_tile` of 1x1 (hand-off, scene encode, three bytes back) | 0.027 ms |
-| 640x480 with **no spheres at all** | 24.4 ms |
-| 640x480, six spheres | 40.2 ms |
+| 640x480 with **no spheres at all** (spine version) | 24 ms of 40 |
 
 The second row is the honest one. With an empty scene the four rays per
 pixel still fly and miss, the 921,600-byte buffer is still built and
-still crosses — and that costs 24 ms of the 40. **About 60% of a
-640x480 render is pixel plumbing, not ray tracing**: building the byte
-list in Bend, packing it into the `Bytes` array, and moving 0.88 MiB
-through the port. Adding more spheres would shift the ratio; this scene
-is too cheap per pixel for the buffer cost to disappear.
+still crosses. A large share of a 640x480 render is pixel plumbing, not
+ray tracing: building the byte list in Bend, packing it into the `Bytes`
+array, and moving 0.88 MiB through the port. Adding more spheres would
+shift the ratio; this scene is too cheap per pixel for the buffer cost
+to disappear.
 
-Two things Elixir wins or ties:
-
-- **Tiling never beats the single call.** One `render_tile` of the whole
-  image is 20–30% faster than the same image as 64-pixel tiles at every
-  thread count. Tiles buy progressive delivery and a shorter deadline per
-  call, not speed.
-- **Batch size matters more than tile size, and bigger is worse.** With
-  12 threads, 64-pixel tiles at 640x480: batch 1 → 81 ms, batch 2 →
-  53 ms, batch 4 → 56 ms, batch 8 → 90 ms, batch 16 → 125 ms. Handing
-  Bend many coarse tiles at once makes it *slower*, which is why the
-  default is 4. Choose the batch before the thread count.
-
-Thread scaling is 4.0x from 1 to 12 threads, well short of the
+Thread scaling is 5.0x from 1 to 12 threads, short of the
 Mandelbrot demo's 7.5x, and the paragraph above says why: the serial
 tail (the byte list, the pack, the transfer) does not shrink with more
 workers.
@@ -206,3 +203,63 @@ comparison against doubles is fuzzy.
   (`tw * th * 3`), so the demo packs the array itself in one pass: 640x480
   went from 57 ms to 40 ms on twelve threads. A `Bytes.from_list` that
   takes a known length would be a useful prelude addition.
+
+## The GPU lane
+
+Two more exports carry a `!`: `upstream_checksum_gpu/2` and
+`render_tiles_gpu/4`. A `!` ships that call and every fork under it to
+the GPU when the port was started with `gpu: :on`, and to the CPU pool
+otherwise; `render/4` takes `lane: :gpu` to use the second one. The build
+sees the `!`, compiles the port with Bend's Metal lane (CUDA on Linux
+when installed) and ships the device program as `<exe>.gpu` beside the
+executable, the way `bend -o` does.
+
+Measured on an M2 Pro (12 threads, 5 samples):
+
+| kernel | CPU pool | GPU |
+|---|---:|---:|
+| upstream fixed scene, 2^9 rows x 1000 px | 30 ms | 34 ms |
+| upstream fixed scene, 2^10 rows x 1600 px | 88 ms | 78 ms |
+| this demo, one 64x64 tile | 0.13 µs/px | 7 µs/px |
+| this demo, one 480x480 tile | 41 ms (whole 640x480) | 1701 ms |
+
+The upstream kernel, written for the device (one flat self-tail def per
+loop, the spheres as pure-word selectors, nothing allocated per ray),
+gains a little on the GPU at the larger size and loses at the smaller.
+This demo's renderer, written for a scene that arrives at run time as a
+list of `Sphere` records, is 50 times slower per pixel on the device than
+on one CPU core, and the time grows linearly with the tile: the lanes
+are not doing useful parallel work. The shader guide says why: every
+lane's read of a shared `+` value (here the sphere list, walked per ray)
+is an atomic, and per-ray allocation (`Vec` results, list cells) is heap
+contention. A bang whose forks form a long right spine (the first
+version forked the tile list as `a b = tile(x) go(rest)`; 300 tiles were
+enough) ends in a runtime `memory fault (machine stack overflow?)` that
+kills the port, which the owner reports as `{:exit_status, 1}` and a
+supervisor restarts. Reduced to a pure Bend program and reported as
+bendlang/bend#918: a spine of about a thousand forks dies on Metal, the
+CPU pool takes any depth, and a balanced tree of the same leaves is
+fine. Both exports now fork the tile list as a balanced tree. With it,
+the GPU lane's best for 640x480 is 62 ms in one bang of 300 32-pixel
+tiles (100 ms with 80 64-pixel tiles, 3 s with one tile: the device
+wants leaves), against 24 ms on the CPU pool; a 1920x1200 bang runs
+long enough for macOS to kill the command buffer (`Impacting
+Interactivity`), which ends the port with status 1 as well. So the GPU
+is still the slow lane for this kernel, and a long kernel is a second
+way to lose the port.
+
+Three changes made for the device paid on the CPU: the row tree is no
+longer appended into one list at every fork (`List.append` is not tail
+recursive; a frame per pixel word was the first thing to overflow the
+device stack), a row is a tail loop pushing each pixel onto the words so
+far, and the tiles of a call fork as a balanced tree. Together they took
+640x480 from 54 ms to 27 ms on 12 threads.
+
+What a GPU-fast version needs is the upstream shape: the scene baked
+into per-lane words rather than a shared list, no constructor per ray,
+and a fork tree sized to the lane cube (the guide's 4^7 leaves). That is
+a different kernel, not a flag, so it stays a separate experiment
+(bendlang/bend#828). The library side is done: `:gpu` on `use Bendler`
+and `start_link/1`, the `.gpu` artifact, and the NIF backend refusing
+the option (the runtime looks for the device program beside the
+executable, which in the BEAM is the VM's own).

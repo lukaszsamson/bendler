@@ -47,7 +47,12 @@ defmodule Bendler.Port do
         :binary,
         :exit_status,
         {:packet, 4},
-        args: ["--threads", Integer.to_string(threads), "--gpu", "off"]
+        args: [
+          "--threads",
+          Integer.to_string(threads),
+          "--gpu",
+          gpu_arg(Keyword.get(opts, :gpu, :off))
+        ]
       ])
 
     {:ok,
@@ -82,6 +87,10 @@ defmodule Bendler.Port do
       {:noreply, %{s | queue: :queue.in(req, s.queue), queued: s.queued + 1}}
     end
   end
+
+  defp gpu_arg(:off), do: "off"
+  defp gpu_arg(:on), do: "on"
+  defp gpu_arg(cap) when is_binary(cap), do: cap
 
   defp start_timer(:infinity, _from), do: nil
   defp start_timer(ms, from), do: Process.send_after(self(), {:deadline, from}, ms)

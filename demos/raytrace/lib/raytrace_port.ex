@@ -26,7 +26,14 @@ defmodule Bendler.Demos.RaytracePort do
     otp_app: :bendler,
     source: "demos/raytrace/raytrace.bend",
     backend: :port,
-    exports: ["render_tile", "render_tiles", "render_checked", "upstream_checksum"]
+    exports: [
+      "render_tile",
+      "render_tiles",
+      "render_tiles_gpu",
+      "render_checked",
+      "upstream_checksum",
+      "upstream_checksum_gpu"
+    ]
 
   @typedoc "A tile: `{x0, y0, width, height}`."
   @type tile :: {non_neg_integer, non_neg_integer, pos_integer, pos_integer}
@@ -72,10 +79,14 @@ defmodule Bendler.Demos.RaytracePort do
   Options:
 
     * `:tile` - the tile edge in pixels (default 64)
-    * `:batch` - tiles per `render_tiles` call (default 4; Bend slows down
-      sharply when many coarse tiles are in flight at once)
+    * `:batch` - tiles per `render_tiles` call (default 16; the tiles of a
+      call fork as a balanced tree, so bigger batches cost nothing on the
+      CPU pool and are what the GPU lane wants: one bang per image)
     * `:on_tile` - `fun({x0, y0, tw, th}, rgb)`, called per tile as it
       arrives, for progressive display
+    * `:lane` - `:cpu` (default) calls `render_tiles`; `:gpu` calls
+      `render_tiles_gpu`, whose `!` ships the batch to the GPU when the
+      port was started with `gpu: :on` (and to the CPU pool otherwise)
   """
   @spec render(scene, pos_integer, pos_integer, keyword) ::
           {pos_integer, pos_integer, binary}
@@ -101,12 +112,13 @@ defmodule Bendler.Demos.RaytracePort do
   @spec stream(scene, pos_integer, pos_integer, keyword) :: Enumerable.t()
   def stream(scene, w, h, opts \\ []) do
     tile = Keyword.get(opts, :tile, 64)
-    batch = Keyword.get(opts, :batch, 4)
+    batch = Keyword.get(opts, :batch, 16)
+    render = if Keyword.get(opts, :lane, :cpu) == :gpu, do: &render_tiles_gpu/4, else: &render_tiles/4
 
     w
     |> tiles(h, tile)
     |> Stream.chunk_every(batch)
-    |> Stream.flat_map(fn chunk -> Enum.zip(chunk, render_tiles(scene, w, h, chunk)) end)
+    |> Stream.flat_map(fn chunk -> Enum.zip(chunk, render.(scene, w, h, chunk)) end)
   end
 
   @doc "The tiles of a `w` x `h` image cut into `edge` x `edge` squares."

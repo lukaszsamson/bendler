@@ -130,25 +130,40 @@ defmodule Bendler.Build do
       # replaces the artifact a running system may still be loading
       staged = artifact <> ".building." <> Integer.to_string(System.unique_integer([:positive]))
 
-      compile!(backend, build_dir, c_path, staged, glue, bytes_flag.(c_path))
+      gpu = compile!(backend, build_dir, c_path, staged, glue, bytes_flag.(c_path))
 
+      # the runtime looks for its GPU program beside the executable, as <exe>.gpu
       File.rename!(staged, artifact)
+
+      if gpu, do: File.rename!(staged <> ".gpu", artifact <> ".gpu"), else: drop_gpu(artifact)
+
       File.write!(stamp_file, stamp)
       {sigs, types, artifact}
     end
   end
 
   # clang builds the emitted C into `staged`: an executable, or a shared
-  # library with the NIF glue and the C patched for the BEAM
-  defp compile!(:port, build_dir, _c_path, staged, _glue, bytes_flag) do
+  # library with the NIF glue and the C patched for the BEAM. A program
+  # with `!` calls builds its GPU lane too (Metal on macOS, CUDA on Linux
+  # when it is installed) and writes the device program as `staged.gpu`,
+  # the way `bend -o` does; answers whether it did.
+  defp compile!(:port, build_dir, c_path, staged, _glue, bytes_flag) do
+    gpu = gpu_lane(c_path)
+
     run!(
       cc(),
-      ~w(-std=c11 -O3 -I. -DBENDLER_TRANSPORT="bendler_port.h") ++
-        bytes_flag ++ ["shim.c", "-o", staged, "-lpthread", "-lm"],
+      gpu_flags(gpu) ++
+        ~w(-std=c11 -O3 -I. -DBENDLER_TRANSPORT="bendler_port.h") ++
+        bytes_flag ++ ["shim.c", "-o", staged, "-lpthread", "-lm"] ++ gpu_libs(gpu),
       build_dir
     )
+
+    if gpu, do: run!(staged, ["--gpu-build"], build_dir)
+    gpu != nil
   end
 
+  # a NIF runs `!` calls on the CPU pool: the runtime finds its GPU program
+  # beside the executable, which in the BEAM is the VM's own
   defp compile!(:nif, build_dir, c_path, staged, glue, bytes_flag) do
     File.write!(Path.join(build_dir, "shim_nif.c"), Gen.host_in_beam!(File.read!(c_path)))
     File.write!(Path.join(build_dir, "bendler_nif_glue.c"), glue)
@@ -161,7 +176,44 @@ defmodule Bendler.Build do
         ["shim_nif.c", "bendler_nif_glue.c", "-o", staged, "-lpthread", "-lm"],
       build_dir
     )
+
+    false
   end
+
+  # a stale device program of an earlier build must not sit beside a CPU build
+  defp drop_gpu(artifact) do
+    _ = File.rm(artifact <> ".gpu")
+    :ok
+  end
+
+  # :metal, :cuda or nil: the GPU lane the emitted C can be built with here
+  defp gpu_lane(c_path) do
+    bangs? = not Regex.match?(~r/^#define BANGS\s+0$/m, File.read!(c_path))
+
+    cond do
+      not bangs? -> nil
+      macos?() -> :metal
+      File.exists?(Path.join(cuda_home(), "include/nvrtc.h")) -> :cuda
+      true -> nil
+    end
+  end
+
+  defp macos?, do: match?({:unix, :darwin}, :os.type())
+  defp cuda_home, do: System.get_env("CUDA_HOME") || "/usr/local/cuda"
+
+  defp gpu_flags(nil), do: []
+  defp gpu_flags(:metal), do: ~w(-x objective-c -fobjc-arc -fmodules -DBEND_METAL=1)
+
+  defp gpu_flags(:cuda),
+    do: [
+      "-DBEND_CUDA=1",
+      "-I#{cuda_home()}/include",
+      "-L#{cuda_home()}/lib64",
+      "-L#{cuda_home()}/lib"
+    ]
+
+  defp gpu_libs(:cuda), do: ["-lcuda", "-lnvrtc"]
+  defp gpu_libs(_), do: []
 
   # The prelude (priv/bend/bendler.bend) is written next to the source that
   # uses Bytes, so `import ./bendler.bend as B` resolves; an outdated copy is

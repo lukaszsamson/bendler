@@ -214,3 +214,18 @@ assumption that the earlier successful ASan run validates the current
 fixture. No generated-runtime patch or sanitizer suppression was applied.
 ASan coverage of Dyn remains blocked pending investigation; normal native
 Port/NIF regressions pass. Leak detection remains disabled.
+
+## The GPU lane (2026-09-20)
+
+Port build of a program with `!` calls: clang with Bend's Metal flags,
+then `<staged> --gpu-build` writes the device program, renamed beside the
+artifact as `<exe>.gpu`. `gpu: :on` on the ray tracer port: the upstream
+checksum kernel answers 402971 and 19281 on the device (bit-exact with
+the CPU), a 64x64 tile of the demo's scene matches the CPU byte for byte;
+`gpu: :off` and a NIF run the same defs on the CPU pool. Config: `:on`,
+`:off`, `"4GB"` accepted; `true`, `"4 gigs"` and `backend: :nif, gpu:
+:on` refused. Not validated: CUDA (no Linux box), `--gpu` with a heap
+cap. The demo's renderer at full size on the device first died with
+`memory fault (machine stack overflow?)`; reduced to a pure Bend program
+(a `!` over a right spine of about a thousand forks) and reported as
+bendlang/bend#918; the demo now forks its tiles as a balanced tree.
