@@ -12,6 +12,13 @@ defmodule Bendler.Codec do
       13 F32 (4 bytes, IEEE bits)      14 Char (4 bytes, a code point)
       15 Data (constructor8, count8, then fields)
 
+  16 is not a value tag: it leads an EVENT frame, a value a Bend def
+  emitted through its emitter parameter before answering. `Bendler.Port`
+  tells the two frame kinds apart by that first byte, strips it, and
+  `event/4` decodes and checks the rest against the declared event type.
+  The host answers every event with a one-byte acknowledgement frame
+  (1 go on, 0 the consumer is gone), which is what bounds the worker.
+
   A Result's Fail is returned as `{:error, value}`; only tag 0 raises a
   transport error. Type expressions may nest up to 32 levels; values up to 2048.
 
@@ -240,6 +247,21 @@ defmodule Bendler.Codec do
 
       {_, rest} ->
         raise Bendler.Error, message: "#{fun}: #{byte_size(rest)} trailing bytes in a reply"
+    end
+  end
+
+  @doc """
+  The value an EVENT frame's body holds (the leading `16` already stripped),
+  decoded and checked against the emitter's declared event type.
+  """
+  @spec event(binary, type, atom, types) :: term
+  def event(bin, type, fun, types \\ %{}) do
+    case decode(bin) do
+      {v, <<>>} ->
+        check(v, type, fun, types)
+
+      {_, rest} ->
+        raise Bendler.Error, message: "#{fun}: #{byte_size(rest)} trailing bytes in an event"
     end
   end
 

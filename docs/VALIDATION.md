@@ -399,3 +399,99 @@ Port 350.63 ms, NIF 358.86 ms; first row 0.118 / 1.363 / 1.139 ms respectively.
 No total-file result list is retained. These are warm-cache end-to-end timings,
 not peak RSS measurements or evidence that Bend is faster than NimbleCSV.
 See `demos/csv/README.md` for the buffering and cancellation contract.
+
+## 2026-09-21: typed events with acknowledgement backpressure
+
+Observed on macOS arm64, Apple M2 Pro, 12 schedulers, Bend 2.0.20 at
+`~/.bend/bin/bend`, Elixir 1.21.0-dev on OTP 28 (erts 16.4.0.1), Apple
+clang 21, `MIX_ENV=test`.
+
+### What was measured
+
+`mix test`: **135 tests, 0 failures**, from 116 before this change. The
+new ones are `test/events_test.exs` (14) and five in
+`demos/raytrace/test/raytrace_test.exs`, one of which is the GPU-gated
+fly-through. Strict Credo, `mix compile --warnings-as-errors`,
+`mix dialyzer` (0 errors) and `mix docs --warnings-as-errors` were clean.
+
+What the event tests pin, each against the real port and a real Bend
+program (`bend/events.bend`):
+
+1. A pure export is unchanged, and an effectful export that emits nothing
+   (`tick`) is an ordinary call.
+2. Events arrive in order, decoded and checked against the emitter's
+   declared type, and the stream ends with `{:done, result}`. A `U32`, a
+   user datatype (`Point`) and a product (`U32 & String`) each cross as
+   events exactly as they cross as replies.
+3. A corrupt event body raises `Bendler.Error`: a bad tag, trailing bytes,
+   and a well-formed value of the wrong type are all refused.
+4. Backpressure: driving the stream one element at a time in the test
+   process, a second event never arrives while the first is unacknowledged
+   (`refute_receive` over 250 ms and again over 100 ms). The worker is
+   parked inside `Bendler.emit`; at most one event is in the mailbox.
+5. Early halt: `Enum.take(stream, 3)` of a 10 000-event turn yields three
+   events and the def stops; the port serves the next call immediately. An
+   exception in the consumer does the same.
+6. A plain (non-stream) call of an emitter export answers 1 for `count`:
+   the def emitted once, was told `False`, and returned.
+7. A consumer killed mid-stream frees the request; the next call works.
+8. A deadline that fires while the worker waits on an acknowledgement stops
+   the owner exactly as any other timeout.
+9. Killing the port mid-stream raises `Bendler.Error` with reason
+   `:exited` in the consumer (the stream monitors the owner).
+10. An effectful export under `backend: :nif` raises at build time.
+
+### Numbers (`demos/raytrace/bench.exs`, samples=5)
+
+Fly-through at 320x240, 24 frames, 12 threads:
+
+| measurement | median | min | max |
+|---|---|---|---|
+| time to first frame | 6.68 ms | 6.33 | 7.64 |
+| per-frame latency | 6.91 ms | 6.20 | 7.82 |
+| 24 frames in one call | 202.8 ms | 190.1 | 206.6 |
+| 24 separate `render_tile` calls | 234.6 ms | 214.9 | 306.8 |
+| cancel (3rd frame) to next call answered | 0.358 ms | 0.325 | 0.442 |
+| `save_apng` of 24 frames | 334.2 ms | 291.0 | 377.0 |
+
+So the whole emit path, including the acknowledgement round trip, costs
+*less* than issuing one request per frame: 8.45 ms per frame in one call
+against 9.78 ms per call, because the scene is encoded and validated once
+instead of 24 times. The acknowledgement itself is well under the 0.358 ms
+that separates a cancellation from the port answering again, which also
+bounds it: that figure includes the refusal reaching the worker, the def
+returning, the reply crossing, and a small unrelated call being served.
+
+The 48-frame, 320x240 sample committed as
+`demos/raytrace/raytrace_flythrough.png` (1.24 MB) takes about 500 ms end
+to end, 10 ms per frame including deflate.
+
+GPU lane, 24 frames at 128x96 with `gpu: :on` (a whole frame per bang):
+CPU 57.3 ms, **GPU 3351.9 ms** — 58x slower, the same verdict the demo's
+single-image GPU section already records for this kernel. A whole 320x240
+frame in one bang is past what macOS tolerates in a single Metal command
+buffer: it aborts with `kIOGPUCommandBufferCallbackErrorImpactingInteractivity`
+and the worker exits 1. The benchmark therefore measures the GPU lane at
+128x96; the gated GPU test uses 64x48 and matches the CPU bit for bit.
+
+### What was not measured
+
+- **No NIF parity.** Events are port-only. The NIF transport would need
+  its own "write event, wait for ack" over the existing wake-up pipe; that
+  is not implemented, and an `IO(T)` export is refused there at build time.
+  The refusal is tested; the hypothetical NIF path is not.
+- **No Linux or CI run of the event tests.** Everything above is one
+  macOS arm64 machine. Nothing in the emit path is platform-specific
+  (`poll`, `read`, `write` on stdin/stdout, as the request path already
+  uses), but that is an argument, not a measurement.
+- **No fault injection on the acknowledgement frame.** A malformed
+  acknowledgement is a `bl_fail` (exit 65) by construction, since only this
+  library writes it; that branch was not exercised.
+- **No long-running soak.** The longest run here is 100 000 announced
+  frames of which three were taken. Memory behaviour over hours of events
+  was not observed.
+- **No multi-subscriber or multi-request semantics.** One request is in
+  flight and one subscriber owns its events, by construction.
+- **Telemetry for streams** emits a span covering the request, closed when
+  the def returns. It was exercised by the suite but not separately
+  asserted for the stream case.

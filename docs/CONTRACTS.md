@@ -17,11 +17,22 @@ qualifiers (`List<&2, T>`, `Maybe<&2, T>`, `Result<&2, &2, E, T>`) and reusable
 (`+`) parameters are accepted. Signatures may span lines. Type expressions
 nest at most 32 levels.
 
-The following are deliberately not exported: `main`, erased (`-`) or template
-(`~`) parameters, `IO` results, closures, arrays, unsupported types, and a
-`Map` nested inside another type (for example `List<Map<U32>>`). A Map value
-is converted as a whole by the Bend prelude and may not contain a user
-datatype. Def names that collide after `.` becomes `_` are rejected.
+A def whose result is `IO(T)`, with `T` of that same set, is exported too,
+and may take one **emitter** parameter, `~emit: T -> IO(Bool)`. The emitter
+is not a wire argument: the shim supplies a lambda over `Bendler.emit`, and
+the export gets a second generated function, `name_stream/n`, yielding
+`{:event, value}` per event and `{:done, result}` at the end. Write the `~`
+(Bend's template marker) whenever the def emits more than once: a function
+type is Type-kinded, so a closure binder cannot be `+`. `+emit:` is refused.
+
+The following are deliberately not exported: `main`, erased (`-`) or other
+template (`~`) parameters, closures that are not emitters, arrays,
+unsupported types, and a `Map` nested inside another type (for example
+`List<Map<U32>>`). A Map value is converted as a whole by the Bend prelude
+and may not contain a user datatype. Def names that collide after `.`
+becomes `_` are rejected. An `IO(T)` export is not available under
+`backend: :nif`: that transport has no event channel, so such a def is
+skipped there, and named in a build error when `exports:` asks for it.
 
 ## User datatypes
 
@@ -79,6 +90,37 @@ PID in `.lock/owner` no longer owns a live build before manually removing
 that specific lock directory. Locks are not automatically reclaimed because
 racing a replacement owner could allow concurrent artifact writes.
 
+## Events and acknowledgements
+
+Worker-to-host frames are a reply (a value tag, or `0` for the transport
+error) or an EVENT frame led by `16` (`BL_EVENT`) and holding one encoded
+value of the emitter's type. Host-to-worker frames are a request, unchanged,
+or a one-byte acknowledgement (`1` go on, `0` stop) answering the event the
+worker is parked on. `BENDLER_MAX_FRAME` bounds an event like any frame, and
+the exit-code contract (0 clean EOF, 65 framing, 74 transport) is unchanged;
+EOF while an acknowledgement is awaited is the host leaving, so the worker
+exits 0.
+
+At most one event is outstanding. An event belongs to the one request in
+flight. With a live subscriber the port owner forwards it and waits for the
+subscriber's acknowledgement; without one (a plain call, a cancelled or dead
+subscriber) it answers `false` at once and drops the event, so the def stops
+early. The owner never blocks on a consumer, and the request's total
+deadline keeps running while events flow: a deadline that fires during an
+acknowledgement wait stops the owner exactly as for any other call.
+
+Demand drives the acknowledgements in the generated stream: the one for
+event N is sent when the consumer asks for event N+1, so a paused consumer
+holds at most one event and the worker waits. Halting early, an exception in
+the consumer, or the consumer's death each make the next emit answer `False`
+and release the request once the def has returned; the port then serves the
+next call. Events are decoded and checked against the emitter's declared
+type, and a corrupt event frame raises `Bendler.Error`.
+
+Cancellation is cooperative and typed: `False` is an ordinary Bend value the
+def may act on. A def that ignores it keeps being answered `False` until it
+returns; only the total deadline is involuntary.
+
 ## Telemetry
 
 Generated functions emit `[:bendler, :call, :start | :stop | :exception]`
@@ -89,6 +131,11 @@ transport), not pure kernel time. NIFs expose total call duration only.
 Exceptions preserve the original raised error but emit a sanitized reason;
 neither arguments nor return values are included in metadata. Forced caller
 death can leave a start event without its matching completion event.
+
+A generated `_stream` opens its span when the stream is first reduced and
+closes it when the request ends, so the span covers the whole request, not
+one event and not the consumer's own work. A consumer that raises still
+closes the span as `:stop` once the def returns.
 
 ## Platform matrix
 

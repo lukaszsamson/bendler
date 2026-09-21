@@ -168,3 +168,62 @@ tree crosses into Bend in 1.6 ms and round-trips in 3.6 ms through the
 port, and a list of 10,000 three-field records in 5.3 ms, of which the
 Elixir encoder is about a third. Prefer flat `List<T>` of small records
 over deep recursion when speed matters.
+
+## Events: `IO(T)` exports and emitter parameters
+
+A def whose result is `IO(T)`, with `T` one of the marshalled types, is an
+export like any other: the shim binds the result in its `do` block and
+replies with it. Such a def may also take an **emitter**, a parameter
+whose type is `T -> IO(Bool)`:
+
+```python
+def fly(~emit: B.Bytes -> IO(Bool), scene: Scene, w: U32, h: U32,
+        frames: U32, cx: F32, cz: F32) -> IO(U32):
+  ...
+```
+
+The emitter is not a wire argument and does not appear in the request
+layout (`bendler_specs.h` and `bl_validate` see only the others). The shim
+supplies it as `~(x => Bendler.emit(WireT, "<spec>", to_wire(x)))`, with
+the same conversion a reply of that type gets, so a `Map` or a user
+datatype crosses as an event exactly as it crosses as a result.
+
+Write the emitter with `~`, Bend's template marker, whenever the def emits
+more than once. A Bend function type is Type-kinded ("a closure captures",
+and `adt_valid` keeps a function field out of `Data`), so a closure binder
+can never be `+` and an ordinary parameter could be applied only once. A
+template is substituted as syntax at compile time and has no such limit.
+A plain `emit:` is accepted for a def that emits at most once; `+emit:` is
+refused with that reason. At most one emitter per def, and an emitter
+needs an `IO(T)` result.
+
+| Bend | Elixir |
+|---|---|
+| `def f(~emit: T -> IO(Bool), ..) -> IO(R)` | `f(..)` and `f_stream(..)` |
+| an `emit(x)` answering `True` | `{:event, x}` from the stream |
+| an `emit(x)` answering `False` | the consumer has gone: stop |
+| the def's result | `{:done, result}`, the stream's last element |
+
+### The EVENT frame
+
+Reply frames start with a value tag (`0` is the transport error). `16`
+(`BL_EVENT`) is not a value tag: it leads an EVENT frame, whose body is
+one encoded value of the emitter's type. `Bendler.Port` tells the two
+frame kinds apart by that byte alone.
+
+The host answers every event with an **acknowledgement frame**: one byte,
+`1` to go on and `0` to stop, in the ordinary length prefix, on the same
+stream that carries requests. The worker parks on it with the runtime's
+`io_wait_on` (as `bl_frame_more` does), so the event loop is never spun,
+and the in-flight request's bytes stay where they are in the input buffer
+while the acknowledgement is consumed from behind them. The request frame
+format is unchanged, and `BENDLER_MAX_FRAME` bounds an event like any
+other frame.
+
+At most one event is outstanding, so the worker cannot run ahead of its
+consumer. A `False` is the only cancellation there is: it is typed, it is
+cooperative, and a def that ignores it simply keeps being told `False`.
+
+Events are a port feature. The NIF transport carries requests and replies
+only, so an `IO(T)` export is skipped under `backend: :nif`, and named in
+a build error when `exports:` asks for it.

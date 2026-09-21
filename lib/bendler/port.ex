@@ -15,12 +15,28 @@ defmodule Bendler.Port do
   code}}`. A well-framed but invalid request is answered with an error
   frame and the worker goes on.
 
+  ## Events
+
+  A worker serving an export with an emitter may send EVENT frames (a
+  leading `16`) before its reply. An event belongs to the one request in
+  flight. `stream/2` admits a request whose caller subscribes to them: the
+  owner forwards `{:bendler_event, ref, binary}` and waits, and the
+  subscriber answers `ack/3` when it wants the next one. The owner writes
+  the worker's one-byte acknowledgement frame then. Without a live
+  subscriber (a plain `call/2`, a subscriber that has cancelled or died)
+  the owner answers `false` at once and drops the event, so the Bend def
+  finishes early. The owner never blocks on a consumer: an outstanding
+  acknowledgement is just state, and the total deadline keeps running.
+
   A native launcher owns the worker process group. Closing the port (also
   when this owner is killed) makes the launcher send TERM, then KILL after
   200 ms, and reap the worker. This does not depend on worker cooperation.
   """
   use GenServer
   require Logger
+
+  @typedoc "What a request's completion is delivered to."
+  @type reply_to :: :call | {:stream, pid, reference}
 
   @spec start_link(keyword) :: GenServer.on_start()
   def start_link(opts) do
@@ -41,6 +57,32 @@ defmodule Bendler.Port do
     end
   catch
     :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
+  end
+
+  @doc """
+  Admits a request whose events the caller subscribes to. Answers
+  `{:ok, ref}` at once; the caller then receives `{:bendler_event, ref,
+  binary}` (answer with `ack/3`) and finally `{:bendler_done, ref, reply,
+  measurements}`, where `reply` is the reply frame or an error tuple.
+  """
+  @spec stream(GenServer.server(), binary) :: {:ok, reference} | {:error, :busy | :exited}
+  def stream(server, frame) do
+    GenServer.call(server, {:stream, frame}, :infinity)
+  catch
+    :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
+  end
+
+  @doc """
+  Answers the event `ref` identifies: `true` for the next one, `false` to
+  stop. An owner that is already gone is not an error here: the subscriber
+  learns that from its monitor.
+  """
+  @spec ack(GenServer.server(), reference, boolean) :: :ok
+  def ack(server, ref, go) do
+    send(server, {:bendler_ack, ref, go})
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   @impl true
@@ -75,17 +117,35 @@ defmodule Bendler.Port do
      }}
   end
 
-  # A request: its frame, its caller, the caller's monitor and its deadline timer.
+  # A request: its frame, its caller, the caller's monitor and its deadline
+  # timer, where its completion goes, and whether an event of it is waiting
+  # for the subscriber's acknowledgement.
   @impl true
   def handle_call({:call, _}, _from, %{queued: n, max_queue: max, inflight: inflight} = s)
       when inflight != nil and n >= max do
     {:reply, {:bendler_reply, {:error, :busy}, %{queue_depth: n, wait_time: 0, run_time: 0}}, s}
   end
 
-  def handle_call({:call, frame}, {pid, _} = from, s) do
+  def handle_call({:stream, _}, _from, %{queued: n, max_queue: max, inflight: inflight} = s)
+      when inflight != nil and n >= max do
+    {:reply, {:error, :busy}, s}
+  end
+
+  def handle_call({:call, frame}, from, s), do: admit(frame, from, :call, s)
+
+  def handle_call({:stream, frame}, {pid, _} = from, s) do
+    ref = make_ref()
+    GenServer.reply(from, {:ok, ref})
+    admit(frame, from, {:stream, pid, ref}, s)
+  end
+
+  defp admit(frame, {pid, _} = from, reply_to, s) do
     req = %{
       frame: frame,
       from: from,
+      reply_to: reply_to,
+      subscriber: :live,
+      awaiting: nil,
       monitor: Process.monitor(pid),
       admitted: System.monotonic_time(),
       dispatched: nil,
@@ -151,14 +211,38 @@ defmodule Bendler.Port do
       run_time: now - dispatched
     }
 
-    GenServer.reply(req.from, {:bendler_reply, reply, measurements})
+    case req.reply_to do
+      :call -> GenServer.reply(req.from, {:bendler_reply, reply, measurements})
+      {:stream, pid, ref} -> send(pid, {:bendler_done, ref, reply, measurements})
+    end
   end
 
+  # 16 leads an EVENT frame; no reply value tag reaches it, so the two
+  # frame kinds are told apart by their first byte alone.
   @impl true
+  def handle_info({port, {:data, <<16, event::binary>>}}, %{port: port, inflight: req} = s)
+      when req != nil do
+    case {req.reply_to, req.subscriber} do
+      {{:stream, pid, ref}, :live} ->
+        send(pid, {:bendler_event, ref, event})
+        {:noreply, %{s | inflight: %{req | awaiting: ref}}}
+
+      _ ->
+        answer(false, s)
+    end
+  end
+
   def handle_info({port, {:data, reply}}, %{port: port, inflight: req} = s) when req != nil do
     finish(req, reply)
     drain(%{s | inflight: nil})
   end
+
+  def handle_info({:bendler_ack, ref, go}, %{inflight: %{awaiting: ref} = req} = s)
+      when is_reference(ref) do
+    answer(go, %{s | inflight: %{req | awaiting: nil, subscriber: if(go, do: :live, else: :gone)}})
+  end
+
+  def handle_info({:bendler_ack, _, _}, s), do: {:noreply, s}
 
   def handle_info({:deadline, from}, %{inflight: %{from: from} = req} = s) do
     finish(req, {:error, :timeout})
@@ -173,8 +257,19 @@ defmodule Bendler.Port do
     {:noreply, %{s | queue: rest, queued: s.queued - length(dropped)}}
   end
 
+  def handle_info({:DOWN, ref, :process, _, _}, %{inflight: %{monitor: ref} = req} = s) do
+    # the subscriber of the request in flight died: the def is told to stop
+    # at its next event and its reply is dropped (an in-flight request must
+    # complete to keep frames aligned)
+    gone = %{req | subscriber: :gone, awaiting: nil}
+
+    if req.awaiting,
+      do: answer(false, %{s | inflight: gone}),
+      else: {:noreply, %{s | inflight: gone}}
+  end
+
   def handle_info({:DOWN, ref, :process, _, _}, s) do
-    # a queued caller died: forget its request (an in-flight one must complete to keep frames aligned)
+    # a queued caller died: forget its request
     {gone, rest} = split(s.queue, &(&1.monitor == ref))
 
     Enum.each(gone, &cancel(&1.timer))
@@ -187,6 +282,21 @@ defmodule Bendler.Port do
   end
 
   def handle_info({:EXIT, _, reason}, s), do: {:stop, reason, s}
+
+  # The one-byte acknowledgement frame the worker is parked on. Unlike a
+  # request, this cannot be abandoned: the worker is mid-request and would
+  # still answer it, so a port that will not take five bytes stops the
+  # owner rather than letting the frames drift apart.
+  defp answer(go, %{inflight: req} = s) do
+    case send_frame(s.port, <<if(go, do: 1, else: 0)>>) do
+      :ok ->
+        {:noreply, s}
+
+      reason ->
+        finish(req, {:error, :exited})
+        {:stop, {:shutdown, {:ack_failed, reason}}, %{s | inflight: nil}}
+    end
+  end
 
   defp cancel(nil), do: :ok
   defp cancel(timer), do: _ = Process.cancel_timer(timer)

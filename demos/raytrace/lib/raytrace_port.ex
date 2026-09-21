@@ -10,7 +10,10 @@ defmodule Bendler.Demos.RaytracePort do
   Elixir owns the scheduling: `render/4` cuts the image into tiles, hands
   them to Bend in batches (Bend forks the tiles, and each tile's rows,
   across every core), and assembles the rows. `stream/4` yields the tile
-  rows as they arrive; `:on_tile` calls back per tile. A `:timeout` given
+  rows as they arrive; `:on_tile` calls back per tile. `fly/5` goes the
+  other way: one Bend call renders a whole camera turn and emits each
+  frame as it finishes, and `save_apng/6` writes them into an animated
+  PNG while the render is still running. A `:timeout` given
   to `start_link/1` bounds a call: past it the call raises
   `Bendler.Error` with reason `:timeout`, the owner stops and a supervisor
   restarts it.
@@ -20,7 +23,7 @@ defmodule Bendler.Demos.RaytracePort do
       {:ok, sup} = Supervisor.start_link([{RaytracePort, threads: 4}], strategy: :one_for_one)
       {w, h, rgb} = RaytracePort.render(RaytracePort.default_scene(), 320, 240)
   """
-  alias Bendler.Demos.Raytrace.Png
+  alias Bendler.Demos.Raytrace.{Apng, Png}
 
   use Bendler,
     otp_app: :bendler,
@@ -31,6 +34,8 @@ defmodule Bendler.Demos.RaytracePort do
       "render_tiles",
       "render_tiles_gpu",
       "render_checked",
+      "fly",
+      "fly_gpu",
       "upstream_checksum",
       "upstream_checksum_gpu"
     ]
@@ -150,4 +155,53 @@ defmodule Bendler.Demos.RaytracePort do
   defp join_row({_y, pieces}) do
     pieces |> Enum.sort() |> Enum.map_join("", &elem(&1, 1))
   end
+
+  @doc """
+  A lazy stream of one camera turn: `{:event, rgb}` per frame as Bend
+  finishes it, then `{:done, frames}` with the number emitted.
+
+  One Bend call renders every frame. The camera turns about the vertical
+  axis through `{cx, cz}` (the `:center` option, default `{0.0, 5.0}`,
+  the demo scene's middle) while the light stays where it is in the
+  world. Backpressure is the acknowledgement: the worker renders the next
+  frame only once this stream is asked for it, and halting early
+  (`Enum.take/2`) ends the turn.
+
+  Options:
+
+    * `:center` - `{cx, cz}`, the point the camera turns about
+    * `:lane` - `:cpu` (default) or `:gpu`, which needs `gpu: :on`
+
+  """
+  @spec fly(scene, pos_integer, pos_integer, pos_integer, keyword) :: Enumerable.t()
+  def fly(scene, w, h, frames, opts \\ []) do
+    {cx, cz} = Keyword.get(opts, :center, {0.0, 5.0})
+
+    if Keyword.get(opts, :lane, :cpu) == :gpu,
+      do: fly_gpu_stream(scene, w, h, frames, cx * 1.0, cz * 1.0),
+      else: fly_stream(scene, w, h, frames, cx * 1.0, cz * 1.0)
+  end
+
+  @doc """
+  Renders a camera turn into the animated PNG at `path`, appending each
+  frame as it arrives, and answers how many frames the file holds.
+
+  Options are `fly/5`'s plus `:delay`, the `{numerator, denominator}`
+  seconds a frame is shown (default `{1, 20}`), and `:take`, a limit that
+  cancels the turn after that many frames.
+  """
+  @spec save_apng(Path.t(), scene, pos_integer, pos_integer, pos_integer, keyword) ::
+          non_neg_integer
+  def save_apng(path, scene, w, h, frames, opts \\ []) do
+    writer = Apng.open(path, w, h, frames: frames, delay: Keyword.get(opts, :delay, {1, 20}))
+    stream = scene |> fly(w, h, frames, opts) |> frames_only(Keyword.get(opts, :take))
+
+    Apng.close(Enum.reduce(stream, writer, fn rgb, a -> Apng.frame(a, rgb) end))
+  end
+
+  defp frames_only(stream, nil), do: Stream.flat_map(stream, &frame_of/1)
+  defp frames_only(stream, take), do: stream |> frames_only(nil) |> Stream.take(take)
+
+  defp frame_of({:event, rgb}), do: [rgb]
+  defp frame_of({:done, _}), do: []
 end

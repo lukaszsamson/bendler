@@ -119,6 +119,7 @@ override the module's. Put it under a supervisor before calling it.
 | `Char` | integer code point (`0..0x10FFFF`, no surrogates) |
 | `Map<V>` (also `Map<&2, V>`), a whole parameter or result | map with valid UTF-8 binary keys |
 | `type T is Data:` of the same file | `{:ctor, field, ...}` per constructor, `:ctor` without fields |
+| `IO(T)` result, with `~emit: E -> IO(Bool)` | the value, plus a `_stream` yielding `{:event, e}` then `{:done, value}` |
 
 These types compose recursively, including bytes inside tuples and variants;
 only `Map` has to be a whole parameter or result, because it crosses as a
@@ -138,11 +139,58 @@ buffer, so a binary crosses as one block instead of a list cell per byte
 (30x faster for 64 KB in the Murmur3 demo). `B.Bytes.to_list/1`,
 `B.Bytes.from_list/1` and `B.Bytes.at/2` are the helpers.
 
-A def is exported when all its parameters and its result are of these types.
-Erased (`-`) and template (`~`) parameters, `IO` results, closures, arrays
-and user datatypes keep a def out (it is reported at debug level). `main` is
+A def is exported when all its parameters and its result are of these types,
+or when its result is `IO(T)` of one of them (see "Events out of Bend").
+Erased (`-`) and template (`~`) parameters, closures, arrays and
+unsupported types keep a def out (it is reported at debug level). `main` is
 never exported: the shim supplies its own. Reusable (`+`) parameters are
 honoured.
+
+### Events out of Bend
+
+A def that answers `IO(T)` may take a typed **emitter**, and then one call
+can hand the BEAM a stream of values while it is still running:
+
+```python
+def fly(~emit: B.Bytes -> IO(Bool), scene: Scene, w: U32, h: U32,
+        frames: U32, cx: F32, cz: F32) -> IO(U32):
+  ...                      # render a frame, emit it, stop early on False
+```
+
+```elixir
+Raytrace.fly_stream(scene, 320, 240, 48, 0.0, 5.0)
+|> Stream.each(fn
+  {:event, rgb} -> write_frame(rgb)   # each frame as Bend finishes it
+  {:done, n} -> IO.puts("#{n} frames")
+end)
+|> Stream.run()
+```
+
+The emitter is not a wire argument: the shim supplies a lambda over a
+fourth foreign effect, `Bendler.emit`, which encodes the value with the
+same codec a reply uses, writes it as an EVENT frame and then parks on the
+host's one-byte acknowledgement. That acknowledgement is the whole
+backpressure and cancellation story: at most one event is outstanding, the
+worker cannot run ahead of the consumer, and an acknowledgement of `False`
+is a typed, cooperative "stop" that the def sees as an ordinary value.
+
+Every export with an emitter gets two functions: `fun(...)`, which refuses
+the events at once (the def's first emit is answered `False`, so it
+finishes early), and `fun_stream(...)`, a lazy `Enumerable` of
+`{:event, value}` ending in `{:done, result}`. Demand drives the
+acknowledgements: the one for an event goes out when the next is asked
+for, so a paused consumer holds one event and the worker waits. Halting
+early (`Enum.take/2`), an exception in the consumer, and the consumer's
+death all end the turn and free the port. Events are type-checked like
+replies. Write the emitter with `~` (Bend's template marker) whenever the
+def emits more than once: a Bend function type is Type-kinded, so a
+closure binder can never be reusable. Events are a **port** feature; under
+`backend: :nif` an `IO(T)` export is refused at build time.
+
+The [raytracer demo](demos/raytrace/README.md)'s `fly` is the worked
+example: one call renders a whole camera turn and each frame arrives in
+Elixir as it finishes, assembled into an animated PNG while the render is
+still running.
 
 Arguments are checked on the Elixir side and raise `ArgumentError`. A call
 returns the value or raises `Bendler.Error`, whose `reason` is `:busy`
@@ -161,12 +209,15 @@ restarts it), `:dead` (the NIF runtime hit a fatal error and is frozen) or
   NIF admission → dirty validation ─▶ Bendler.fn()    (foreign effect: waits for a frame)
    or Port ({:packet, 4}) ────────▶    Bendler.arg(T)  (foreign effect: decodes one argument)
                                         M.fib(n, a, b)  (the user's def, on every core)
+  ◀── event frame (tag 16) ◀────────   Bendler.emit(T, x)  (port only: writes, then waits
+    ── ack byte (1 go on / 0 stop) ─▶                        for the host's answer as a Bool)
   ◀──────────── reply frame ◀────────  Bendler.reply(T, x) (foreign effect: encodes the result)
 ```
 
-Bendler generates a *shim*: a Bend file that imports yours, declares three
-foreign effects (`Bendler.fn`, `Bendler.arg`, `Bendler.reply`) and a `main`
-that loops: read a function index, pull each argument, call the def, reply.
+Bendler generates a *shim*: a Bend file that imports yours, declares the
+foreign effects (`Bendler.fn`, `Bendler.arg`, `Bendler.reply`, and
+`Bendler.emit` when an export has an emitter) and a `main` that loops: read
+a function index, pull each argument, call the def, reply.
 Bend's own compiler emits the C; the effects are ordinary Bend foreign C
 files (`priv/c/`), spliced into that C by the compiler. The same shim serves
 both backends, only the transport header differs:
@@ -188,7 +239,14 @@ never has to know the layout of a user constructor.
 
 - **One request at a time per module.** The shim's loop is sequential;
   admission is bounded (`max_queue`, `max_waiting`) and the rest are told
-  `:busy` at once. Inside a call, Bend still uses every core.
+  `:busy` at once. Inside a call, Bend still uses every core. An event
+  belongs to the one request in flight, and its acknowledgement round trip
+  is a whole pipe round trip, so events are for meaningful units of work
+  (a rendered frame), not for streaming small values.
+- **Events are cooperative.** `False` is a value the Bend def must act on.
+  A def that ignores it keeps being answered `False` until it returns;
+  only the total deadline is involuntary, and it discards the whole worker.
+  Events are not available on the NIF backend.
 - **Batch small calls.** With the launcher, telemetry and codec budgets,
   a short Levenshtein port call averaged 48 µs locally. A 64-pair medium
   batch averaged 9.6 µs/pair versus Elixir's 37.8 µs/pair. Earlier ~10 µs
@@ -261,7 +319,10 @@ This uses incremental typed calls, not general Bend-to-BEAM effects.
 The [raytracer](demos/raytrace/README.md) takes its whole scene as user
 datatypes and answers packed RGB `Bytes`, with parallel tiles, an
 Elixir-owned tile schedule and deadline, a PNG writer, and a bit-exact
-upstream checksum beside the F32-against-doubles comparison.
+upstream checksum beside the F32-against-doubles comparison. Its camera
+fly-through is the worked example of typed events: one call renders a
+whole turn and each frame arrives as it finishes, into an animated PNG
+that grows while the render runs.
 
 ```
 lib/bendler.ex          use Bendler: builds at compile time, defines the functions
@@ -269,9 +330,9 @@ lib/bendler/sig.ex      parses def signatures, decides what is exportable
 lib/bendler/gen.ex      writes the shim; patches the emitted C for the BEAM
 lib/bendler/build.ex    runs bend and clang, caches by input hash
 lib/bendler/codec.ex    the frame codec
-lib/bendler/port.ex     the port owner: bounded queue, deadline, exit codes
+lib/bendler/port.ex     the port owner: bounded queue, deadline, events, exit codes
 lib/mix/tasks/          mix compile.bendler and mix bendler.clean
-priv/c/                 the foreign effects and the two transports
+priv/c/                 the four foreign effects and the two transports
 priv/bend/bendler.bend  the prelude (Bytes), copied next to sources that use it
 bend/fib.bend           the example module
 test/support/           Bendler.Examples.FibNif and FibPort, and the crash and admission fixtures

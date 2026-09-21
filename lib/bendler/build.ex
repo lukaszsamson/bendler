@@ -19,7 +19,7 @@ defmodule Bendler.Build do
 
   @supported_bend "bend 2.0.20"
   @c_files ~w(bendler_common.h bendler_port.h bendler_nif.h bendler_fn.c bendler_arg.c bendler_reply.c
-              bendler_fn.js bendler_arg.js bendler_reply.js)
+              bendler_emit.c bendler_fn.js bendler_arg.js bendler_reply.js bendler_emit.js)
   @launcher "bendler_launcher"
 
   @type opts :: %{
@@ -129,6 +129,7 @@ defmodule Bendler.Build do
   defp exports!(%{module: module, source: source} = opts) do
     src = File.read!(source)
     {sigs, skipped, types} = Sig.parse(src)
+    {sigs, skipped} = backend_gate(sigs, skipped, opts.backend)
     sigs = filter(sigs, opts[:exports], module, skipped)
 
     for {n, why} <- skipped, opts[:exports] == nil or n in opts[:exports] do
@@ -432,6 +433,20 @@ defmodule Bendler.Build do
                 "the emitted C has no #{name} constructor of the prelude; is the prelude imported?"
       end
     end)
+  end
+
+  @nif_no_io "an IO(T) export needs the :port backend: the NIF transport has no " <>
+               "event and acknowledgement channel, so Bendler.emit cannot run in it"
+
+  # The NIF transport carries requests and replies only. An effectful
+  # export (and therefore every emitter) is refused here, at build time,
+  # rather than failing later: it is skipped when the module exports
+  # everything, and named in the error when the user asked for it.
+  defp backend_gate(sigs, skipped, :port), do: {sigs, skipped}
+
+  defp backend_gate(sigs, skipped, :nif) do
+    {io, pure} = Enum.split_with(sigs, & &1.effectful)
+    {pure, skipped ++ Enum.map(io, &{&1.name, @nif_no_io})}
   end
 
   defp filter(sigs, nil, _, _), do: sigs
