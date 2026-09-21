@@ -56,7 +56,7 @@ defmodule Bendler.Gen do
     def Bendler.reply(-A: Type, spec: String, x: A) -> IO(Unit):
       import "./bendler_reply.c"
       import "./bendler_reply.js"
-
+    #{emit_effect(sigs)}
     #{st.defs |> Enum.reverse() |> Enum.join("\n")}
     def Bendler.step(fn: U32) -> IO(Unit):
       match fn:
@@ -79,7 +79,7 @@ defmodule Bendler.Gen do
     """
   end
 
-  defp arm(%Sig{name: name, params: params, ret: {ret_t, ret_text}}, i, st) do
+  defp arm(%Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig, i, st) do
     {binds, st} =
       Enum.map_reduce(params, st, fn p, st ->
         data = Sig.has_data?(p.type)
@@ -91,16 +91,60 @@ defmodule Bendler.Gen do
       end)
 
     {args, st} = Enum.map_reduce(params, st, &from_wire(&1.type, &1.text, &1.name, &2))
-    {call, st} = to_wire(ret_t, ret_text, "M.#{name}(#{Enum.join(args, ", ")})", st)
+    {args, st} = with_emitter(args, sig, st)
+    call = "M.#{name}(#{Enum.join(args, ", ")})"
+
+    reply_head =
+      "Bendler.reply(#{wire_type(ret_t, ret_text, st)}, #{inspect(Sig.spec(ret_t, st.index))}, "
+
+    {steps, st} =
+      if sig.effectful do
+        # the def answers IO(T): bind the result, then reply with it
+        {wired, st} = to_wire(ret_t, ret_text, "r", st)
+
+        {[
+           "        r : #{shim_type(ret_text, st)} <- #{call}",
+           "        #{reply_head}#{wired})"
+         ], st}
+      else
+        {wired, st} = to_wire(ret_t, ret_text, call, st)
+        {["        #{reply_head}#{wired})"], st}
+      end
 
     arm = """
         case #{i}:
           do IO<Unit>:
-    #{Enum.join(binds, "\n")}
-            Bendler.reply(#{wire_type(ret_t, ret_text, st)}, #{inspect(Sig.spec(ret_t, st.index))}, #{call})\
+    #{Enum.join(binds ++ steps, "\n")}\
     """
 
     {arm, st}
+  end
+
+  # The emitter argument the shim supplies: a lambda over `Bendler.emit`
+  # of the event type, converted to the wire form exactly as a reply is.
+  # `~` is the template form, which is what a def emitting more than once
+  # needs (a Bend function type is Type-kinded, so a closure binder can
+  # never be reusable).
+  defp with_emitter(args, %Sig{emitter: nil}, st), do: {args, st}
+
+  defp with_emitter(args, %Sig{emitter: e, emitter_at: at}, st) do
+    {wired, st} = to_wire(e.type, e.text, "x", st)
+    t = wire_type(e.type, e.text, st)
+    lam = "x => Bendler.emit(#{t}, #{inspect(Sig.spec(e.type, st.index))}, #{wired})"
+    {List.insert_at(args, at, if(e.template, do: "~(#{lam})", else: lam)), st}
+  end
+
+  defp emit_effect(sigs) do
+    if uses_emit?(sigs) do
+      """
+
+      def Bendler.emit(-A: Type, spec: String, x: A) -> IO(Bool):
+        import "./bendler_emit.c"
+        import "./bendler_emit.js"
+      """
+    else
+      ""
+    end
   end
 
   # A Map crosses as Base's pair list of the same kind, a user datatype as
@@ -158,8 +202,17 @@ defmodule Bendler.Gen do
   @spec uses_data?([Sig.t()]) :: boolean
   def uses_data?(sigs), do: Enum.any?(sigs, &any_type?(&1, fn t -> match?({:data, _}, t) end))
 
+  @doc "Whether any export takes an emitter parameter."
+  @spec uses_emit?([Sig.t()]) :: boolean
+  def uses_emit?(sigs), do: Enum.any?(sigs, &(&1.emitter != nil))
+
   defp any_type?(sig, pred) do
-    Enum.any?([elem(sig.ret, 0) | Enum.map(sig.params, & &1.type)], &walk?(&1, pred))
+    emitted = if sig.emitter, do: [sig.emitter.type], else: []
+
+    Enum.any?(
+      [elem(sig.ret, 0) | emitted] ++ Enum.map(sig.params, & &1.type),
+      &walk?(&1, pred)
+    )
   end
 
   defp walk?(t, pred) do

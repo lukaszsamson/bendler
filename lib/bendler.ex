@@ -98,7 +98,7 @@ defmodule Bendler do
     funs =
       sigs
       |> Enum.with_index()
-      |> Enum.map(fn {sig, i} -> Bendler.define(sig, i, codec_types, cfg.backend) end)
+      |> Enum.flat_map(fn {sig, i} -> Bendler.define(sig, i, codec_types, cfg.backend) end)
 
     typedefs = Enum.map(types, &Bendler.Sig.data_typespec/1)
 
@@ -255,6 +255,112 @@ defmodule Bendler do
     end)
   end
 
+  @doc false
+  @spec stream(module(), atom(), tuple()) :: Enumerable.t()
+  def stream(module, fun, {index, pairs, codec, return_type, event_type}) do
+    Stream.resource(
+      fn -> open_stream(module, fun, index, pairs, codec) end,
+      &pull(&1, fun, return_type, event_type, codec),
+      &release_stream/1
+    )
+  end
+
+  defp open_stream(module, fun, index, pairs, codec) do
+    span = Bendler.Telemetry.open(module, fun, :port)
+    frame = Bendler.Codec.request(index, pairs, codec)
+
+    case Bendler.Port.stream(module, frame) do
+      {:ok, ref} ->
+        %{
+          module: module,
+          ref: ref,
+          span: span,
+          monitor: Process.monitor(module),
+          owed: false,
+          done: false
+        }
+
+      {:error, reason} ->
+        Bendler.Telemetry.close_exception(span, :error, reason)
+        raise Bendler.Error, message: "#{fun}: #{reason}", reason: reason
+    end
+  end
+
+  # Demand drives the acknowledgements: the one for the event just yielded
+  # goes out when the consumer asks for the next, so a paused consumer
+  # holds at most one event and the worker waits inside `Bendler.emit`.
+  #
+  # `pull` may leave by raising, and `Stream.resource`'s release then sees
+  # the state as it was before that call. A per-stream process key records
+  # that the request is already over, so the release does not wait for a
+  # reply that can no longer come.
+  defp pull(%{done: true} = st, _fun, _ret, _event, _codec), do: {:halt, st}
+
+  defp pull(st, fun, ret, event, codec) do
+    if st.owed, do: Bendler.Port.ack(st.module, st.ref, true)
+    st = %{st | owed: false}
+    ref = st.ref
+    mon = st.monitor
+
+    receive do
+      {:bendler_event, ^ref, body} ->
+        {[{:event, Bendler.Codec.event(body, event, fun, codec)}], %{st | owed: true}}
+
+      {:bendler_done, ^ref, reply, measurements} ->
+        Process.put(over(ref), true)
+        done(st, reply, measurements, fun, ret, codec)
+
+      {:DOWN, ^mon, :process, _, _} ->
+        Process.put(over(ref), true)
+        Bendler.Telemetry.close_exception(st.span, :error, :exited)
+        raise Bendler.Error, message: "#{fun}: exited", reason: :exited
+    end
+  end
+
+  defp done(st, reply, measurements, fun, ret, codec) do
+    value = Bendler.Codec.check(result(reply, fun), ret, fun, codec)
+    Bendler.Telemetry.close(st.span, :stop, measurements)
+    {[{:done, value}], %{st | span: nil, done: true}}
+  rescue
+    e ->
+      Bendler.Telemetry.close_exception(st.span, :error, e)
+      reraise e, __STACKTRACE__
+  end
+
+  defp over(ref), do: {__MODULE__, :stream, ref}
+
+  # Halting early (Enum.take, a raise in the consumer) refuses the next
+  # event, then waits for the def to answer, so the port serves the next
+  # call as soon as this one returns.
+  defp release_stream(st) do
+    _ = Process.demonitor(st.monitor, [:flush])
+
+    unless Process.delete(over(st.ref)) do
+      Bendler.Port.ack(st.module, st.ref, false)
+      mon = Process.monitor(st.module)
+      drain_stream(st, mon)
+      _ = Process.demonitor(mon, [:flush])
+    end
+
+    :ok
+  end
+
+  defp drain_stream(st, mon) do
+    ref = st.ref
+
+    receive do
+      {:bendler_event, ^ref, _} ->
+        Bendler.Port.ack(st.module, st.ref, false)
+        drain_stream(st, mon)
+
+      {:bendler_done, ^ref, _, measurements} ->
+        Bendler.Telemetry.close(st.span, :stop, measurements)
+
+      {:DOWN, ^mon, :process, _, _} ->
+        Bendler.Telemetry.close_exception(st.span, :error, :exited)
+    end
+  end
+
   defp send_frame(:port, module, frame, _deadline), do: Bendler.Port.call(module, frame)
 
   defp send_frame(:nif, module, frame, deadline) do
@@ -282,23 +388,78 @@ defmodule Bendler do
     sig_text =
       "def #{name}(#{Enum.map_join(params, ", ", &"#{if &1.reusable, do: "+", else: ""}#{&1.name}: #{&1.text}")}) -> #{ret_text}"
 
-    quote do
-      @doc "Bend: `#{unquote(sig_text)}` (line #{unquote(sig.line)})."
-      @spec unquote(fname)(unquote_splicing(types)) :: unquote(ret_spec)
-      def unquote(fname)(unquote_splicing(vars)) do
-        deadline = __bendler_deadline__()
+    args = Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
 
-        Bendler.invoke(
-          __MODULE__,
-          unquote(fname),
-          unquote(backend),
-          deadline,
-          {unquote(index),
-           unquote(
-             Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
-           ), unquote(Macro.escape(codec)), unquote(Macro.escape(ret_t))}
-        )
+    call =
+      quote do
+        @doc "Bend: `#{unquote(sig_text)}`#{unquote(doc_tail(sig))} (line #{unquote(sig.line)})."
+        @spec unquote(fname)(unquote_splicing(types)) :: unquote(ret_spec)
+        def unquote(fname)(unquote_splicing(vars)) do
+          deadline = __bendler_deadline__()
+
+          Bendler.invoke(
+            __MODULE__,
+            unquote(fname),
+            unquote(backend),
+            deadline,
+            {unquote(index), unquote(args), unquote(Macro.escape(codec)),
+             unquote(Macro.escape(ret_t))}
+          )
+        end
       end
-    end
+
+    [call | stream_fun(sig, fname, index, vars, args, codec, ret_t, ret_spec, types, sig_text)]
+  end
+
+  defp doc_tail(%Bendler.Sig{emitter: nil}), do: ""
+
+  defp doc_tail(%Bendler.Sig{emitter: e}),
+    do:
+      ", whose events are discarded: the first `#{e.name}` is answered `False`, " <>
+        "so the def stops early. Use the `_stream` function to receive them"
+
+  defp stream_fun(%Bendler.Sig{emitter: nil}, _, _, _, _, _, _, _, _, _), do: []
+
+  defp stream_fun(
+         %Bendler.Sig{emitter: e},
+         fname,
+         index,
+         vars,
+         args,
+         codec,
+         ret_t,
+         ret_spec,
+         types,
+         sig_text
+       ) do
+    sname = :"#{fname}_stream"
+    event_spec = Bendler.Sig.typespec(e.type)
+
+    [
+      quote do
+        @doc """
+        The lazy event stream of `#{unquote(sig_text)}`.
+
+        Yields `{:event, value}` per event the def emits through
+        `#{unquote(e.name)}`, decoded and checked against
+        `#{unquote(e.text)}`, and ends with `{:done, result}`. Demand
+        drives the acknowledgements: the one for an event goes out when
+        the next is asked for, so a paused consumer holds one event and
+        the worker waits inside its emit. Halting early (`Enum.take/2`,
+        a raise) makes the next emit answer `False`, and the stream
+        releases the request once the def has returned.
+        """
+        @spec unquote(sname)(unquote_splicing(types)) ::
+                Enumerable.t({:event, unquote(event_spec)} | {:done, unquote(ret_spec)})
+        def unquote(sname)(unquote_splicing(vars)) do
+          Bendler.stream(
+            __MODULE__,
+            unquote(sname),
+            {unquote(index), unquote(args), unquote(Macro.escape(codec)),
+             unquote(Macro.escape(ret_t)), unquote(Macro.escape(e.type))}
+          )
+        end
+      end
+    ]
   end
 end

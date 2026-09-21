@@ -35,7 +35,7 @@ defmodule Bendler.Sig do
   prelude's `Dyn` tree; the C codec never lays out a user constructor.
   """
 
-  defstruct [:name, :params, :ret, :line]
+  defstruct [:name, :params, :ret, :line, effectful: false, emitter: nil, emitter_at: nil]
 
   @type type ::
           :u32
@@ -53,11 +53,21 @@ defmodule Bendler.Sig do
           | {:maybe, type}
           | {:result, type, type}
   @type param :: %{name: String.t(), type: type, text: String.t(), reusable: boolean}
+  @typedoc """
+  An emitter parameter: the def's typed event sink. `type` is the event
+  type, `template` whether it was written `~emit:` (a Bend template, which
+  is what a def emitting more than once needs, since a function type is
+  Type-kinded and a closure can therefore never be reusable).
+  """
+  @type emitter :: %{name: String.t(), type: type, text: String.t(), template: boolean}
   @type t :: %__MODULE__{
           name: String.t(),
           params: [param],
           ret: {type, String.t()},
-          line: pos_integer
+          line: pos_integer,
+          effectful: boolean,
+          emitter: emitter | nil,
+          emitter_at: non_neg_integer | nil
         }
 
   @typedoc "A parsed type beside the text that spelled it and its parts, for the generator."
@@ -186,12 +196,54 @@ defmodule Bendler.Sig do
   defp build("main", _, _, _, _), do: {:skip, "main", "main is the program, not an export"}
 
   defp build(name, params, ret, no, ctx) do
-    with {:ok, params} <- parse_params(params, ctx),
+    {effectful, ret} = io_result(ret)
+
+    with {:ok, all} <- parse_params(params, ctx),
          {:ok, ret_t} <- parse_type(ret, ctx),
-         :ok <- map_holds_no_data(ret_t) do
-      {:ok, %__MODULE__{name: name, params: params, ret: {ret_t, String.trim(ret)}, line: no}}
+         :ok <- map_holds_no_data(ret_t),
+         {:ok, wire, emitter, at} <- split_emitter(all, effectful) do
+      {:ok,
+       %__MODULE__{
+         name: name,
+         params: wire,
+         ret: {ret_t, String.trim(ret)},
+         line: no,
+         effectful: effectful,
+         emitter: emitter,
+         emitter_at: at
+       }}
     else
       {:error, why} -> {:skip, name, why}
+    end
+  end
+
+  @io_re ~r/^IO\s*\((.*)\)$/s
+
+  # An `IO(T)` result makes the def an effectful export: the shim binds the
+  # result in its do block and replies with it, exactly as for a pure one.
+  defp io_result(text) do
+    case Regex.run(@io_re, String.trim(text)) do
+      [_, inner] -> {true, inner}
+      nil -> {false, text}
+    end
+  end
+
+  # The emitter parameter is not a wire argument: the shim supplies the
+  # lambda. At most one, and only on an effectful def.
+  defp split_emitter(all, effectful) do
+    case Enum.split_with(all, &(&1.kind == :emitter)) do
+      {[], wire} ->
+        {:ok, Enum.map(wire, &Map.delete(&1, :kind)), nil, nil}
+
+      {[e], wire} when effectful ->
+        {:ok, Enum.map(wire, &Map.delete(&1, :kind)), Map.delete(e, :kind),
+         Enum.find_index(all, &(&1.kind == :emitter))}
+
+      {[_], _} ->
+        {:error, "an emitter parameter needs an IO(T) result"}
+
+      {[_ | _], _} ->
+        {:error, "more than one emitter parameter"}
     end
   end
 
@@ -208,16 +260,46 @@ defmodule Bendler.Sig do
   defp parse_param(text, ctx) do
     case Regex.run(@param_re, text) do
       [_, "-", n, _] -> {:error, "erased parameter #{n}"}
-      [_, "~", n, _] -> {:error, "template parameter #{n}"}
-      [_, q, n, t] -> typed_param(n, q == "+", String.trim(t), ctx)
+      [_, q, n, t] -> one_param(n, q, String.trim(t), ctx)
       nil -> {:error, "unreadable parameter #{inspect(text)}"}
+    end
+  end
+
+  @emitter_re ~r/^(.+?)\s*->\s*IO\s*\(\s*Bool\s*\)$/s
+
+  # `emit: T -> IO(Bool)` (or `~emit:`, the template form) is the emitter;
+  # everything else is an ordinary wire parameter.
+  defp one_param(name, quantifier, text, ctx) do
+    case Regex.run(@emitter_re, text) do
+      [_, event] -> emitter_param(name, quantifier, String.trim(event), ctx)
+      nil when quantifier == "~" -> {:error, "template parameter #{name}"}
+      nil -> typed_param(name, quantifier == "+", text, ctx)
+    end
+  end
+
+  defp emitter_param(name, "+", _, _),
+    do: {:error, "emitter #{name}: a function type is Type-kinded, so it cannot be `+`"}
+
+  defp emitter_param(name, quantifier, text, ctx) do
+    with {:ok, type} <- parse_type(text, ctx),
+         :ok <- map_holds_no_data(type) do
+      {:ok,
+       %{
+         kind: :emitter,
+         name: name,
+         type: type,
+         text: text,
+         template: quantifier == "~"
+       }}
+    else
+      {:error, why} -> {:error, "emitter #{name}: #{why}"}
     end
   end
 
   defp typed_param(name, reusable, text, ctx) do
     with {:ok, type} <- parse_type(text, ctx),
          :ok <- map_holds_no_data(type) do
-      {:ok, %{name: name, type: type, text: text, reusable: reusable}}
+      {:ok, %{kind: :wire, name: name, type: type, text: text, reusable: reusable}}
     else
       {:error, why} -> {:error, "parameter #{name}: #{why}"}
     end
@@ -230,16 +312,18 @@ defmodule Bendler.Sig do
 
   defp map_holds_no_data(_), do: :ok
 
-  # Splits on the commas outside <>, () and {}.
+  # Splits on the commas outside <>, () and {}. The `>` of an arrow is not
+  # a closing bracket: `~emit: U32 -> IO(Bool), n: U32` has two parameters.
   defp split_top(text) do
-    {parts, cur, _} =
+    {parts, cur, _, _} =
       text
       |> String.graphemes()
-      |> Enum.reduce({[], "", 0}, fn
-        ",", {parts, cur, 0} -> {[cur | parts], "", 0}
-        c, {parts, cur, d} when c in ["<", "(", "{"] -> {parts, cur <> c, d + 1}
-        c, {parts, cur, d} when c in [">", ")", "}"] -> {parts, cur <> c, d - 1}
-        c, {parts, cur, d} -> {parts, cur <> c, d}
+      |> Enum.reduce({[], "", 0, ""}, fn
+        ",", {parts, cur, 0, _} -> {[cur | parts], "", 0, ","}
+        c, {parts, cur, d, _} when c in ["<", "(", "{"] -> {parts, cur <> c, d + 1, c}
+        ">", {parts, cur, d, "-"} -> {parts, cur <> ">", d, ">"}
+        c, {parts, cur, d, _} when c in [">", ")", "}"] -> {parts, cur <> c, d - 1, c}
+        c, {parts, cur, d, _} -> {parts, cur <> c, d, c}
       end)
 
     Enum.reverse([cur | parts])

@@ -45,6 +45,55 @@ defmodule Bendler.Telemetry do
     end
   end
 
+  @typedoc "A span opened by `open/3` and closed by `close/3`."
+  @opaque span :: {map(), integer()}
+
+  @doc """
+  Opens a span whose stop is emitted later, for a lazily consumed stream:
+  its start and stop happen in different calls, so `span/4` cannot wrap it.
+  """
+  @spec open(module(), atom(), :port | :nif) :: span()
+  def open(module, function, backend) do
+    metadata = %{
+      module: module,
+      function: function,
+      backend: backend,
+      telemetry_span_context: make_ref()
+    }
+
+    started = System.monotonic_time()
+
+    :telemetry.execute(
+      [:bendler, :call, :start],
+      %{system_time: System.system_time(), monotonic_time: started},
+      metadata
+    )
+
+    {metadata, started}
+  end
+
+  @doc "Closes a span opened by `open/3`: `:stop`, or `:exception` with a reason."
+  @spec close(span(), :stop | :exception, map()) :: :ok
+  def close({metadata, started}, event, measurements) do
+    now = System.monotonic_time()
+
+    :telemetry.execute(
+      [:bendler, :call, event],
+      Map.merge(measurements, %{duration: now - started, monotonic_time: now}),
+      metadata
+    )
+  end
+
+  @doc "Closes a span opened by `open/3` as an exception of `kind` and `reason`."
+  @spec close_exception(span(), atom(), term()) :: :ok
+  def close_exception({metadata, started}, kind, reason) do
+    close(
+      {Map.merge(metadata, %{kind: kind, reason: reason_tag(reason)}), started},
+      :exception,
+      %{}
+    )
+  end
+
   @doc false
   @spec record(map()) :: :ok
   def record(measurements) do

@@ -7,7 +7,11 @@
 
 enum { BL_ERR = 0, BL_U32 = 1, BL_NAT = 2, BL_STR = 3, BL_BOOL = 4, BL_UNIT = 5, BL_LIST = 6, BL_BYTES = 7,
        BL_TUPLE = 8, BL_NONE = 9, BL_SOME = 10, BL_OK = 11, BL_FAIL = 12, BL_F32 = 13, BL_CHR = 14,
-       BL_DATA = 15 };
+       BL_DATA = 15,
+       // 16 is not a value tag: it leads an EVENT frame from the worker to
+       // the host (an emitted event), which the host answers with a
+       // one-byte acknowledgement frame (1 go on, 0 the consumer is gone).
+       BL_EVENT = 16 };
 
 // A Char is a code point: below 0x110000 and not a surrogate.
 static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF); }

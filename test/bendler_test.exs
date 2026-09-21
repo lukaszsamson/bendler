@@ -94,6 +94,7 @@ defmodule BendlerTest do
         """)
 
       assert [
+               %Sig{name: "ok", effectful: true, ret: {:u32, "U32"}, emitter: nil},
                %Sig{
                  name: "lists",
                  params: [%{type: {:list, {:list, :string}}}],
@@ -104,8 +105,7 @@ defmodule BendlerTest do
 
       assert [
                {"id", "erased parameter A"},
-               {"main", _},
-               {"ok", "unsupported type IO(U32)"}
+               {"main", _}
              ] = skipped
 
       assert_raise Bendler.Error, ~r/would all become a_b/, fn ->
