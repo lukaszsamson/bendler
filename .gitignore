@@ -6,3 +6,5 @@
 /.elixir_ls/
 erl_crash.dump
 *.ez
+/bendler-*.tar
+.DS_Store

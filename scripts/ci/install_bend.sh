@@ -42,7 +42,7 @@ if [[ -e "${destination}" ]]; then
   exit 2
 fi
 mkdir -p "${destination}"
-tar -xzf "${archive}" -C "${destination}"
+tar -xzf "${archive}" -C "${destination}" --strip-components=1
 
 test -x "${destination}/bin/bend"
 echo "${destination}/bin" >> "${GITHUB_PATH:?GITHUB_PATH is required}"

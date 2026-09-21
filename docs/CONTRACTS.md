@@ -98,6 +98,13 @@ death can leave a start event without its matching completion event.
 | Linux x86_64 | Bend 2.0.20 archive, SHA-256 pinned in CI | workflow configured, not yet run/verified here | experimental; no release promise |
 | Other targets | not packaged by this project | unsupported | unsupported |
 
+The CPU binding contract covers bounded pure functions, not Bend's Window or
+Audio effects. Those effects need separate lifecycle and transport design;
+Linux also requires their X11/ALSA development libraries and link flags.
+The supported generated programs include neither effect, so their builds do
+not link `-lX11` or `-lasound`. The macOS-only `-undefined dynamic_lookup` flag
+is omitted on Linux. CI pins LLVM clang 21.1.8 as well as Bend, OTP and Elixir.
+
 The port backend is the release recommendation. The NIF depends on Bend runtime
 internals and reserves substantial virtual address space. A VM-lifetime native
 resource pin prevents code purge from unloading its library beneath live
