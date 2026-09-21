@@ -41,7 +41,7 @@ N=64 TICKS=2000 SAMPLES=5 MIX_ENV=test mix run demos/particles/bench.exs
   has returned. Unlike Port, the runtime cannot be forcibly terminated safely.
 
 The callback effects must stay on the sequential IO spine; concurrent emits
-through `IO.fork` are unsupported. NIF ask replies, combined ask/emit exports,
+through `IO.fork` are unsupported. Combined ask/emit exports,
 windowed acknowledgements, multiple executing requests, GPU execution and safe
 runtime unload are not implemented. All existing experimental NIF hazards apply;
 Port remains the default and the isolation boundary for untrusted work.

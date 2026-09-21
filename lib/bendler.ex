@@ -523,7 +523,8 @@ defmodule Bendler do
   defp doc_tail(%Bendler.Sig{emitter: nil}), do: ""
 
   defp doc_tail(%Bendler.Sig{emitter: %{reply: _}}),
-    do: ", with a final unary Elixir callback argument (Port only; 5-second handler deadline)"
+    do:
+      ", with a final unary Elixir callback argument (5-second handler deadline; an abandoned NIF ask freezes its module)"
 
   defp doc_tail(%Bendler.Sig{emitter: e}),
     do:
