@@ -4,6 +4,10 @@
 
 This release is not published yet. The current tree includes:
 
+- Lazy streaming CSV demo over Port and experimental NIF, with arbitrary
+  binary chunks, bounded records/batches, caller-owned cursors, differential
+  tests and a NimbleCSV streaming benchmark. This uses incremental calls;
+  general BEAM `ask`/`emit` effects remain deferred.
 - A supervised CPU port backend for bounded pure Bend functions, with generated
   Elixir bindings, typed codecs, bounded admission, deadlines, telemetry, and
   launcher-owned worker termination.

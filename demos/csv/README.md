@@ -66,7 +66,10 @@ separator (quote, CR, LF or outside a byte). EOF's offset is input byte size.
 Errors return through Result; a subsequent request still works. Parser errors
 do not promise NimbleCSV's wording. Transport errors remain exceptions.
 
-Not implemented: streaming, incremental parsing, dumping, arbitrary escape
+The eager `parse_string/2` API is unchanged. A separate bounded incremental
+API is described below.
+
+Not implemented: dumping, arbitrary escape
 strings, multi-byte separators, alternate newline configurations, BOM removal
 or UTF-16 conversion. This is not a drop-in NimbleCSV replacement. Parsing is
 a sequential state machine; it neither requests GPU builds nor pretends a
@@ -99,6 +102,118 @@ every measured case. This Bend parser converts input into a byte list,
 allocates field buffers and transfers the entire nested result to the BEAM.
 A future parse-and-compute kernel returning a small aggregate might amortize
 that cost, but this benchmark does not establish it.
+
+## Streaming: Port first, experimental NIF parity
+
+`stream.bend` reuses the eager parser's state transitions and makes them
+resumable. `CsvStream.parse_stream/2` accepts an Enumerable of **arbitrary
+binary chunks** and lazily yields rows. It supports quoted multiline fields,
+doubled quotes, split CRLF, arbitrary bytes and EOF without a terminator.
+
+```elixir
+alias Bendler.Demos.{CsvStream, CsvStreamPort}
+
+# The demo modules are compiled in MIX_ENV=test, like the other demos.
+{:ok, supervisor} = Supervisor.start_link([CsvStreamPort], strategy: :one_for_one)
+
+"large.csv"
+|> File.stream!(16_384)
+|> CsvStream.parse_stream(backend: :port, skip_headers: true)
+|> Enum.reduce(0, fn _row, count -> count + 1 end)
+
+# Same API, without starting a Port. All experimental NIF hazards still apply.
+["name,value\nAlice,", "\"a,b\"\n"]
+|> CsvStream.parse_stream(backend: :nif)
+|> Enum.to_list()
+# [["Alice", "a,b"]]
+
+Supervisor.stop(supervisor)
+```
+
+Options:
+
+| Option | Default | Contract |
+|---|---|---|
+| `backend` | `:port` | `:port` or experimental `:nif` |
+| `separator` | `","` | one byte, not quote/CR/LF |
+| `skip_headers` | `true` | discard the first parsed row, even across chunks |
+| `chunk_bytes` | 16,384 | maximum bytes sent per call, 1–65,536 |
+| `max_record_bytes` | 65,536 | maximum physical record size, 1–65,536; includes quotes, separators and terminators |
+
+Syntax and record-limit errors raise `CsvStream.Error` with `code` and an
+absolute zero-based `byte_offset`. Code 5 means record limit exceeded; the
+other codes match the eager parser. Rows already delivered are not rolled
+back. A failing batch is not partially delivered, so the exact delivered
+prefix before an error can depend on chunking. Valid-input results and error
+offsets do not. Transport errors remain `Bendler.Error`.
+
+### Demand, cancellation and limitations
+
+This is **host-driven incremental parsing**, not a long-running Bend `IO`
+export with `ask`/`emit`. The new work does not implement general BEAM effects
+or change the native transport. Each ordinary typed call returns a bounded
+row batch and an opaque cursor containing partial field/row buffers. The
+Elixir enumeration owns that cursor; neither backend holds a parser session.
+
+- Demand drives source reads and native calls. There is no background
+  producer or subscriber mailbox. A paused consumer starts no more work.
+- A native call handles at most `chunk_bytes`; completed rows are delivered
+  one at a time from that batch before asking for more input. Tiny source
+  chunks are not coalesced automatically.
+- `Enum.take/2` and normal consumer errors halt/close a compliant source
+  Enumerable without flushing EOF. No native cancellation is needed between
+  batches. Death during a call retains the existing backend semantics: a NIF
+  computation is abandoned, not interrupted; Port ownership is unchanged.
+- Both bindings use one CPU worker and a 5-second **per-call** timeout. This
+  is not a whole-stream deadline or a timeout on user-provided source IO.
+- Application buffering is bounded by a partial record plus one input/output
+  batch, not total file size. That is not an OS RSS cap: Bend's arena, allocator
+  retention, concurrent enumerations, source buffering and consumer storage
+  are outside it. A source yielding a huge binary can retain that binary while
+  its slices are consumed; use fixed-size file chunks for bounded source IO.
+- Cursor copying costs time, especially a long partial field arriving in tiny
+  chunks. Such input can cause quadratic cumulative copying within the
+  configured record limit. This demo does not claim faster CSV parsing.
+- The raw generated `feed_csv/5` functions expose implementation details;
+  use `parse_stream/2` for validated limits. No cursor persistence/versioning
+  contract is provided.
+
+### Streaming validation and benchmark
+
+```sh
+MIX_ENV=test mix test demos/csv/test/csv_stream_test.exs --warnings-as-errors
+MIX_ENV=test mix run demos/csv/check_stream_asan.exs
+ROWS=10000,100000 SAMPLES=5 MIX_ENV=test mix run demos/csv/stream_bench.exs
+```
+
+The shared 26-test suite covers both backends: every two-part split of
+representative binary/quoted fixtures, one-byte chunks, generated tables,
+concurrent cursors, lazy reads, source and consumer failures, early halt,
+maximum-size records, limits across chunks, EOF diagnostics and reuse after
+errors. The ASan probe instruments the external Port with the existing
+platform-ABI workaround; it does not instrument a NIF inside the BEAM.
+
+The benchmark writes a temporary CSV file with quoted/multiline/Unicode
+fields, then reads fixed-size chunks. Every full run reduces output to a row
+count and checksum instead of retaining all rows. NimbleCSV uses
+`to_line_stream/1` before `parse_stream/2`. Fixture generation and warmup are
+outside timing; file reading, parsing and reduction are inside. Time to first
+row uses a separate early-halting run. Results are warmed medians, not cold
+disk IO or peak-RSS measurements.
+
+Local Apple M2 Pro, Elixir 1.20.3 / OTP 28 / Bend 2.0.20, 16 KiB chunks,
+one Bend CPU worker, five samples:
+
+| Rows | Input bytes | NimbleCSV total / first row | Port total / first row | NIF total / first row |
+|---:|---:|---:|---:|---:|
+| 10,000 | 507,788 | 10.51 / 0.135 ms | 36.07 / 1.173 ms | 33.33 / 1.137 ms |
+| 100,000 | 5,277,790 | 100.32 / 0.118 ms | 350.63 / 1.363 ms | 358.86 / 1.139 ms |
+
+NimbleCSV remains the recommendation for CSV alone. Port and NIF are close;
+this workload does not justify accepting NIF isolation hazards for speed.
+The gain over the eager demo is incremental consumption and bounded parser
+state, not a measured throughput advantage. Tiny chunks and very long partial
+records make cursor copying more expensive.
 
 ## Safety checks
 

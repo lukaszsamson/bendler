@@ -374,3 +374,28 @@ grounded in Bend's documented/generated behavior; this macOS CI runner did
 have a device, so its passing test is not evidence for a headless Metal run.
 Local raytracer validation after the change also passed all 12 tests, and
 strict Credo reported no issues.
+
+## Incremental CSV over Port and NIF (2026-09-21)
+
+Local validation: **142 tests passed**, including 26 new streaming tests shared
+between Port and NIF. They cover arbitrary chunk partitions, UTF-8 and arbitrary
+bytes, escaped/multiline fields, maximum-size records, absolute error offsets,
+concurrent cursors, lazy demand, early halt, source/consumer failure and reuse.
+The implementation uses ordinary bounded typed calls, not an `ask`/`emit`
+protocol; no native transport or NIF lifecycle code changed.
+
+The new external-Port ASan probe passed 150 partitioned round trips, a 64 KiB
+record, and error recovery, followed by three consecutive successful reruns.
+Like the existing probe it uses the platform-ABI workaround and disables leak
+detection. An initial attempt exited with transport status 74 without an ASan
+diagnostic; a one-request check and all subsequent full probes passed. Its
+cause has not been established, so these results do not claim that transient
+transport exits have been eliminated. The probe is included in CI; these new
+changes have only been validated locally, not in a new remote CI run yet.
+
+An isolated five-sample, one-worker benchmark using fixed 16 KiB file chunks
+and checksummed reduction measured 100,000 rows (5.28 MB): NimbleCSV 100.32 ms,
+Port 350.63 ms, NIF 358.86 ms; first row 0.118 / 1.363 / 1.139 ms respectively.
+No total-file result list is retained. These are warm-cache end-to-end timings,
+not peak RSS measurements or evidence that Bend is faster than NimbleCSV.
+See `demos/csv/README.md` for the buffering and cancellation contract.

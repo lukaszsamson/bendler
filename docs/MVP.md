@@ -193,6 +193,11 @@ small interface, and where Bend's parallelism can show. In order:
    replacement for NimbleCSV's streaming/configurable parser. At 10,000 rows,
    NimbleCSV wins: plain 5.7 vs 28.4 ms, quoted 35.2 vs 98.1 ms. No additional
    user-datatype converter was needed: private parser state stays in Bend.
+   A separate bounded streaming API now resumes the parser across arbitrary
+   chunks on Port and experimental NIF. Its cursor crosses as Base tuples and
+   byte buffers; Elixir demand controls reads and calls. This is not the
+   deferred `ask`/`emit` effect protocol. See the CSV README for limits,
+   cancellation semantics and the streaming benchmark.
 
 7. **A raytracer whose scene is a user datatype** (done: `demos/raytrace/`;
    GPU lane added since: the port builds with Bend's Metal lane and ships

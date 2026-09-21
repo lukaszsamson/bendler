@@ -85,7 +85,9 @@ jobs:
         env:
           MIX_ENV: test
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:handle_segv=2
-        run: mix run demos/csv/check_asan.exs
+        run: |
+          mix run demos/csv/check_asan.exs
+          mix run demos/csv/check_stream_asan.exs
 
       - name: Sustained overload and RSS observation
         env:

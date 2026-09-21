@@ -255,6 +255,9 @@ tree-bitonic sorting with `Enum.sort` and `MapSet`, including list round-trip
 costs and cases where more Bend workers make performance worse.
 The [small CSV parser](demos/csv/README.md) uses tuples, Maybe and Result,
 with byte-preserving fields and differential tests against NimbleCSV.
+Its lazy `CsvStream.parse_stream/2` also parses arbitrary chunks over Port or
+the experimental NIF, with bounded records/batches and demand-driven input.
+This uses incremental typed calls, not general Bend-to-BEAM effects.
 The [raytracer](demos/raytrace/README.md) takes its whole scene as user
 datatypes and answers packed RGB `Bytes`, with parallel tiles, an
 Elixir-owned tile schedule and deadline, a PNG writer, and a bit-exact
