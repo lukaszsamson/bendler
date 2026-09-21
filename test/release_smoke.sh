@@ -19,14 +19,18 @@ cd "$tmp/consumer"
 mix deps.compile
 mix compile
 
-artifact="priv/bendler/host/prod/consumer_calc"
+# Mix may copy priv or create it directly in the build tree when the source
+# project has no priv directory. Inspect the application's canonical build
+# path rather than assuming a source-tree symlink (which differed on Linux).
+consumer_priv="_build/prod/lib/consumer/priv"
+artifact="$consumer_priv/bendler/host/prod/consumer_calc"
 test -x "$artifact"
-test -x "priv/bendler/host/prod/bendler_launcher"
+test -x "$consumer_priv/bendler/host/prod/bendler_launcher"
 
 # Clean only the active host/prod scope. A sentinel representing another
 # target/environment must survive, while the retained request lets ordinary
 # `mix compile` restore the active worker and launcher.
-sentinel="priv/bendler/other_target/other_env/keep"
+sentinel="$consumer_priv/bendler/other_target/other_env/keep"
 mkdir -p "$(dirname "$sentinel")"
 : > "$sentinel"
 mix bendler.clean
@@ -34,7 +38,7 @@ test ! -e "$artifact"
 test -e "$sentinel"
 mix compile
 test -x "$artifact"
-test -x "priv/bendler/host/prod/bendler_launcher"
+test -x "$consumer_priv/bendler/host/prod/bendler_launcher"
 
 mix release --overwrite --no-compile
 release_priv=$(find "$tmp/consumer/_build/prod/rel/consumer/lib" -path '*/priv/bendler/host/prod/consumer_calc' -print -quit)

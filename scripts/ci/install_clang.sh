@@ -47,3 +47,11 @@ tar -xJf "${LLVM_ASSET}" -C "${destination}" --strip-components=1
 test -x "${destination}/bin/clang"
 echo "${destination}/bin" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
 "${destination}/bin/clang" --version
+
+# Upstream LLVM does not discover the Xcode SDK the way Apple clang does.
+# Export its sysroot for every later build, including ASan and isolated probes.
+if [[ "${LLVM_ASSET}" == *macOS* ]]; then
+  sdkroot=$(xcrun --sdk macosx --show-sdk-path)
+  test -d "${sdkroot}"
+  echo "SDKROOT=${sdkroot}" >> "${GITHUB_ENV:?GITHUB_ENV is required}"
+fi
