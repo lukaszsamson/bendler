@@ -83,3 +83,9 @@ jobs:
 
       - name: Compiler-free consumer release
         run: sh test/release_smoke.sh
+
+      - name: Experimental NIF lifecycle in isolated VMs
+        run: |
+          MIX_ENV=test mix run scripts/check_nif_lifecycle.exs
+          MIX_ENV=test mix run scripts/check_nif_init.exs
+          MIX_ENV=test mix run scripts/check_nif_scheduler.exs

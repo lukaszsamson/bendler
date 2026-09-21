@@ -290,3 +290,52 @@ cap. The demo's renderer at full size on the device first died with
 `memory fault (machine stack overflow?)`; reduced to a pure Bend program
 (a `!` over a right spine of about a thousand forks) and reported as
 bendlang/bend#918; the demo now forks its tiles as a balanced tree.
+
+## Experimental asynchronous NIF roadmap (2026-09-21)
+
+Local macOS arm64 / OTP 28 / Elixir 1.20.3 / Bend 2.0.20 validation:
+
+- `mix test --warnings-as-errors --seed 2`: **116 passed**. Earlier full
+  runs at seeds 1 and 594702 passed 115 tests, before the long finite-deadline
+  regression was added. The new suite covers reference-preserving replies,
+  expired deadlines, time spent before encoding, queued and running
+  cancellation, admission limits, caller death, and large finite timeouts.
+- Formatting, strict Credo, Dialyzer (zero errors) and docs with warnings as
+  errors passed.
+- `MIX_ENV=test mix run scripts/check_nif_lifecycle.exs`: a disposable BEAM
+  rejects replacement loading, calls the original binding again, submits
+  work, deletes and soft-purges the module, receives the native result after
+  purge, and exits via `:init.stop()` with status zero. The launcher bounds
+  a stalled child. This proves pinning and VM exit, not graceful thread joins.
+- `MIX_ENV=test mix run scripts/check_nif_init.exs`: separate fault-injected
+  libraries reject initialization before any thread is created and after a
+  thread exists but before readiness. Both child VMs exit successfully;
+  expected on-load failure warnings are part of these probes.
+- `MIX_ENV=test mix run scripts/check_nif_scheduler.exs`: three consecutive
+  runs passed with one dirty CPU scheduler. A test-only blocking NIF's live
+  running flag remains set while Bendler returns `:busy`. A caller killed
+  while its validation is queued leaves no reserved admission behind. The
+  probe verifies both saturation and blocker liveness before killing it;
+  it does not rely solely on a sleep or function-name observation.
+- The Port ASan harness still passes 100 composite cycles plus 500 fuzz
+  frames. This is **not NIF sanitizer coverage**; leak detection stays off.
+
+Independent ownership review found and fixed a destructor that tried to
+demonitor after OTP had dismantled the resource's monitor tree. Readiness
+waiting was also moved to a dirty IO scheduler. The isolated upgrade test
+found an identical-BEAM reload edge case invalidating target-local telemetry
+closures after failed on-load; the closure now lives in stable library code.
+An existing Port restart test now waits for service recovery instead of
+assuming a 50 ms cold start during the launcher's 200 ms termination grace.
+
+One local overhead sample, 100 warm-ups then 5,000 verified typed
+`fib(20, 0, 1)` calls per backend: NIF **15.6 µs/call**, Port **19.9 µs/call**.
+NIF used its default thread count; Port used two. These are serial tiny-call
+averages, not direct-call NIF latency or a universal performance claim. They
+do not justify treating the experimental NIF as equivalent to Port isolation.
+
+CI now invokes all three isolated NIF scripts. Remote CI and Linux execution
+remain unverified here. Runtime pinning intentionally retains threads, the
+library and runtime memory until VM exit; fatal current requests also remain
+retained because other runtime workers may still access them. Hard
+cancellation, graceful unload, hot upgrade and runtime restart are not solved.

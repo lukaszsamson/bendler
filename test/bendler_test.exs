@@ -288,9 +288,9 @@ defmodule BendlerTest do
       assert Task.await(t1, 5_000) == :timeout
       assert Task.await(t2, 5_000) == :exited
       assert_receive {:DOWN, ^ref, :process, ^pid, {:shutdown, :timeout}}, 1_000
-      # the supervisor restarted it under the same name
-      Process.sleep(50)
-      assert SlowPort.fib(10, 0, 1) == 55
+      # Restart and the launcher's TERM/KILL grace period are asynchronous;
+      # wait for service recovery rather than assuming a 50 ms cold start.
+      assert eventually(fn -> reason(fn -> SlowPort.fib(10, 0, 1) end) == 55 end)
     end
 
     test "an invalid request is refused before the def runs, and the worker lives on" do

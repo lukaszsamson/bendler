@@ -77,7 +77,7 @@ target, OTP). A release ships the artifact and does not need `bend`.
 | `exports` | the defs to export (default: every exportable def) |
 | `timeout` | milliseconds a call may wait (default `:infinity`); port: the owner closes the port and stops, a supervisor restarts it; NIF: the caller gives up, the reply is discarded when it comes |
 | `max_queue` | port: callers allowed to wait behind the one in flight (default 8) |
-| `max_waiting` | NIF: callers admitted at once, waiting or in flight (default 4), each on a dirty scheduler thread |
+| `max_waiting` | NIF: total staged, queued and running calls (default 4); callers wait in Elixir |
 | `gpu` | port: where `!` calls run: `:off` (default, the CPU pool), `:on`, or a heap cap like `"4GB"`; a program with `!` is built with its GPU lane and ships `<name>.gpu` beside the executable |
 
 The port module has `start_link/1` and `child_spec/1`; options given there
@@ -140,7 +140,7 @@ restarts it), `:dead` (the NIF runtime hit a fatal error and is frozen) or
   Fib.fib(30, 0, 1)
     │ Bendler.Codec: <<idx::32, args>>
     ▼
-  NIF (dirty CPU) ── pipe+condvar ──▶  Bendler.fn()    (foreign effect: waits for a frame)
+  NIF admission → dirty validation ─▶ Bendler.fn()    (foreign effect: waits for a frame)
    or Port ({:packet, 4}) ────────▶    Bendler.arg(T)  (foreign effect: decodes one argument)
                                         M.fib(n, a, b)  (the user's def, on every core)
   ◀──────────── reply frame ◀────────  Bendler.reply(T, x) (foreign effect: encodes the result)
@@ -157,9 +157,10 @@ both backends, only the transport header differs:
   Bend's event loop (`io_wait_on`), so the loop never blocks.
 - **NIF**: the emitted C is patched (`main` → `bend_main`, the runtime's
   signal handlers dropped, `_exit` → `bendler_die`) and linked as a shared
-  library with a small `erl_nif` glue. At load, a thread runs `bend_main`
-  with `--threads N`. A dirty-scheduler NIF copies the frame in, pokes a
-  pipe, and waits on a condition variable for the reply.
+  library with a small `erl_nif` entry table. Checked initialization pins
+  the library for the VM lifetime, then runs `bend_main` with `--threads N`.
+  Normal-scheduler admission precedes dirty validation/copying; native
+  completion sends a message. Waiting uses an ordinary Elixir `receive`.
 
 Every value that crosses is a Base type the runtime lays out itself
 (`io_str`, `io_node(CID_CON, ...)`, packed `Bool`), which is why the C side
@@ -186,15 +187,17 @@ never has to know the layout of a user constructor.
   (a segfault) still kills the VM, as with any NIF. The port backend has the
   process boundary instead: a runtime error exits the worker (1), a protocol
   error exits 65, a transport error 74, and a supervisor restarts it.
-- **NIF callers wait on dirty CPU schedulers.** At most `max_waiting` plus
-  the one in flight do; size it with your dirty scheduler count in mind.
-- **No reload, upgrade or unload** of a NIF module: the runtime's threads
-  cannot be stopped. Nothing enforces this: purging the module's code can
-  unload the library under threads still running it. Do not purge a module
-  that loaded a Bendler NIF. A second `load_nif` is refused (no upgrade
-  callback).
-- **The NIF deadline** starts after validation and after a dirty scheduler
-  was obtained, so it is shorter than the caller's wall clock.
+- **NIF admission precedes dirty scheduling.** `max_waiting` counts staged,
+  queued and running requests. Abandoning running work does not free its
+  slot until it finishes; queued work can be removed.
+- **NIF runtimes are pinned until VM exit.** A retained callback-bearing
+  resource prevents code purge from unloading code beneath live threads.
+  It deliberately retains the library, threads and memory; this is not
+  graceful runtime unload. Upgrade is refused. Replacing a loaded artifact
+  or repeatedly reloading modules is unsupported.
+- **The NIF deadline** is absolute and starts before encoding. Scheduler
+  queueing and validation consume the same budget, but scheduling can still
+  delay delivery of the timeout. This is not a hard real-time guarantee.
 - **The emitted C is patched by regex.** The build asserts each patch
   matched exactly as expected and that no `sigaction`, `signal`, `_exit` or
   `abort` call survives; a Bend release that changes the runtime fails the

@@ -99,9 +99,20 @@ death can leave a start event without its matching completion event.
 | Other targets | not packaged by this project | unsupported | unsupported |
 
 The port backend is the release recommendation. The NIF depends on Bend runtime
-internals, reserves substantial virtual address space, and cannot safely be
-reloaded or purged while its runtime threads exist. Rebuild artifacts whenever
-Bendler or Bend changes; no mixed-version ABI negotiation is provided.
+internals and reserves substantial virtual address space. A VM-lifetime native
+resource pin prevents code purge from unloading its library beneath live
+threads. Purge does not reclaim its runtime; hot upgrade/reload is unsupported.
+Rebuild artifacts with the old VM stopped; no mixed-version ABI negotiation
+is provided. See `NIF_ROADMAP.md` and `BEAM_API.md`.
+
+NIF deadlines are absolute monotonic milliseconds captured before encoding.
+Admission precedes dirty validation/copying; waiting uses an ordinary process
+receive. Caller death or timeout removes queued work, while running work stays
+admitted until completion. Cancellation synchronizes with sending so the
+wrapper can drain racing replies without later mailbox pollution. Internal
+raw submit/cancel functions are not a supported public async API; callers of
+that plumbing must explicitly cancel on deadline. There is no native timer
+thread interrupting a running computation.
 
 ## Sanitizer note
 

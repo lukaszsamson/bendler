@@ -1,85 +1,100 @@
-# Which parts of erl_nif and erl_driver Bendler needs
+# BEAM APIs used by Bendler
 
-Read against OTP 28's `erts/doc/references/erl_nif.md` (about 190
-`enif_*` functions) and `erl_driver.md` (102 `driver_*`/`erl_drv_*`
-functions) in `~/otp`. The question is not "how much of the API can be
-wrapped" but "which parts does a Bend binding actually touch", because
-Bend never sees Erlang terms: everything crosses as a frame the codec
-defines. That keeps the surface small on purpose.
+Bend never sees Erlang terms: the interface remains a bounded binary frame
+codec. More BEAM APIs do not automatically mean more Bend types. This design
+was checked against OTP 28's local `erl_nif.md` and resource implementation
+in `erl_nif.c`. The [online reference](https://www.erlang.org/doc/apps/erts/erl_nif.html)
+may describe a newer OTP release.
 
-## erl_nif: what the NIF backend uses today
+## Experimental NIF call path
 
-| area | functions | used for |
+1. Generated Elixir functions capture an absolute monotonic deadline before
+   encoding arguments.
+2. `__bendler_submit/3` checks the envelope and reserves bounded admission
+   on a normal scheduler. Saturated calls return `:busy` without waiting
+   for a dirty scheduler.
+3. `enif_schedule_nif` runs validation and copying on a dirty CPU scheduler.
+   No dirty CPU scheduler waits for Bend computation to finish.
+4. The runtime sends `{:bendler_reply, ref, reply}` using `enif_send`;
+   Elixir waits with an ordinary `receive`.
+5. Timeout cancels the handle and drains an already-delivered racing reply.
+   Sending and cancellation use the same short lock, so sending cannot start
+   after cancel returns.
+
+Submit/cancel are internal plumbing, not a supported public asynchronous
+API. The generated typed functions remain synchronous. Raw users must cancel
+on deadline: there is no native deadline timer that interrupts a running
+computation. Queued work is removed on cancellation/caller death. Running
+work retains admission until completion; it cannot be interrupted.
+
+## Ownership
+
+A scheduled resource term owns a RESERVED request. If its process dies before
+the dirty continuation runs, the resource destructor retires admission.
+Queueing acquires a native resource reference, retained through execution and
+reply construction. Down callbacks cancel queued work or abandon running work.
+
+The stored process-independent environment contains only an immutable
+reference. Reply construction gets a fresh environment outside the mailbox
+lock, so large binary allocation/copying cannot block normal admission on that
+lock. Error envelopes are small and sent under the lock. Finalization releases
+the monitor, request buffer, environment and native reference. OTP already
+dismantles monitors before a resource destructor: the destructor must not
+demonitor again.
+
+A runtime fatal error replies `:dead` to pending/current callers and freezes
+that runtime. Pending requests can be reclaimed. The current request remains
+allocated because other Bend workers might still read it; at most the bounded
+current request and runtime state are intentionally retained until VM exit.
+
+## Startup, purge and shutdown
+
+`load` validates configuration and opens callback-bearing resource types.
+The generated `@on_load` then calls `__bendler_init__/0` after `load_nif`
+commits those types. Init runs on a dirty IO scheduler, allocates a pin before
+starting threads, checks initialization results, and waits at most 30 seconds
+for the Bend request loop to become ready.
+
+The native pin's initial reference is deliberately never released after a
+thread starts. OTP postpones unloading while a resource with a destructor in
+that library exists. This is a **VM-lifetime pin**, not a stop-and-join
+destructor. Code purge cannot unmap the runtime's library, but it also does not
+reclaim its threads or heap. Upgrade is explicitly refused. Failed startup
+releases the pin only if no native thread was created.
+
+An `unload` callback returns `void`; it cannot refuse unloading. Omitting it
+or merely logging from it is not protection. Graceful unload needs upstream
+stop flags, cancellation points, retained thread IDs, joins, queue wakeups,
+mapping cleanup and global-state reset. Recovery from a frozen runtime still
+requires VM restart. Do not replace a loaded artifact or repeatedly reload
+the module. Normal VM exit relies on OS reclamation, not graceful thread joins.
+
+## API surface
+
+| Area | APIs | Purpose |
 |---|---|---|
-| entry | `ERL_NIF_INIT`, `load` | one library per module, `load_info` carries threads and admission |
-| calling | `ErlNifFunc` with `ERL_NIF_DIRTY_JOB_CPU_BOUND` | every call blocks for the runtime, so it must not sit on a normal scheduler |
-| terms in | `enif_inspect_binary`, `enif_get_int`, `enif_get_tuple` | the frame and the timeout |
-| terms out | `enif_make_new_binary`, `enif_make_tuple2`, `enif_make_atom`, `enif_make_string`, `enif_raise_exception`, `enif_make_badarg` | the reply frame and the error shapes |
+| Entry | `ERL_NIF_INIT`, load/upgrade callbacks | configuration checks, upgrade refusal |
+| Resources | `enif_open_resource_type[_x]`, `enif_alloc_resource`, `enif_make_resource`, `enif_get_resource`, `enif_keep_resource`, `enif_release_resource` | pin and request ownership |
+| Scheduling | `enif_schedule_nif`, dirty IO init | validation/copying and bounded readiness wait |
+| Time | `enif_monotonic_time` | absolute BEAM monotonic milliseconds |
+| Monitoring | `enif_self`, `enif_monitor_process`, `enif_demonitor_process` | caller-death cleanup |
+| Delivery | `enif_alloc_env`, `enif_make_copy`, `enif_send`, `enif_free_env` | independent reference/reply lifetimes |
+| Terms | binary inspection/construction, integer/reference checks, tuples/atoms | frame envelope and errors |
 
-That is nine functions. Everything else the docs describe is either not
-needed by design or belongs to a later track.
+Load info includes the actual dirty CPU scheduler count from
+`:erlang.system_info/1`, not an assumed `enif_system_info` field. Admission
+is configured independently because it no longer occupies dirty schedulers
+while waiting. Runtime pthreads remain; wrapping them with `enif_thread_*`
+would not make the upstream pool stoppable.
 
-## erl_nif: what an MVP should add
+No ETF decoder, arbitrary BEAM terms, atom creation from user strings, public
+PID handles, progress effects or streaming API is added here.
 
-- **`upgrade` and `unload` callbacks**, even if `upgrade` only returns an
-  error: today their absence is what refuses a second `load_nif`. `unload`
-  cannot stop the runtime's threads; it should at least log and refuse.
-- **Resources** (`enif_open_resource_type`, `enif_alloc_resource`,
-  `enif_make_resource`, `enif_release_resource`, `enif_keep_resource`) to
-  pin the library: a resource term held by the module keeps the library
-  from being unloaded on code purge, which is the correct answer to "the
-  runtime thread would keep running in unloaded code". Also the vehicle for
-  an opaque handle to a long-lived Bend value later.
-- **`enif_consume_timeslice`** does not apply (dirty jobs), but
-  **`enif_schedule_nif`** could split a call: validate on a normal
-  scheduler, run on a dirty one, so `:busy` answers without occupying a
-  dirty thread (the review's admission point).
-- **Process-independent environments** (`enif_alloc_env`,
-  `enif_make_copy`, `enif_send`, `enif_free_env`) for `Beam.send` from an
-  effect on the runtime thread: progress, streaming, and a future
-  asynchronous call shape where the NIF returns at once and the reply
-  arrives as a message (`enif_self` for the caller's pid, `enif_monitor_process`
-  to drop work when the caller dies).
-- **Binaries as bytes** (`enif_inspect_binary` on the way in already;
-  `enif_make_new_binary` out) once the codec has a bytes type; iovecs
-  (`enif_inspect_iovec`, `enif_ioq_*`) only if streaming large payloads.
-- **Threads and locks**: `enif_thread_create`, `enif_mutex_*`, `enif_cond_*`
-  instead of raw pthreads, so the VM's lock checker and thread naming see
-  them. Cheap to switch; worth it before publishing the NIF as supported.
-- **`enif_system_info`** for the dirty scheduler count, to size
-  `max_waiting` sensibly by default.
+## erl_driver
 
-Not needed: term construction beyond binaries and small tuples (the codec
-is the contract), maps, ports, `enif_binary_to_term`/`term_to_binary`
-(unless the codec is replaced by ETF, which the review argued against
-for a C decoder), time functions, hashing, `enif_getenv`.
-
-## erl_driver: not the right tool
-
-The port backend uses an OS process, which is a *port program*, not a
-*port driver*. Drivers are linked-in C loaded into the VM, with the
-`ErlDrvEntry` callbacks (`start`, `stop`, `output`, `ready_input`,
-`outputv`, `control`, `timeout`, `process_exit`) and the driver API
-(`driver_output*`, `driver_select`, `driver_async`, `driver_alloc_binary`,
-`set_busy_port`, `erl_drv_busy_msgq_limits`, the `erl_drv_thread_*` and
-lock families). A driver would give the port backend in-process speed
-without a NIF's blocking rules, and `set_busy_port` plus
-`erl_drv_busy_msqg_limits` are exactly the backpressure the review asked
-for, but:
-
-- the runtime's constraints are the same as for a NIF (global state,
-  threads, signals, `_exit`), so nothing gets safer;
-- OTP's own docs steer new code to NIFs; drivers are the legacy path;
-- the two things drivers do better, `driver_select` on an fd and async
-  thread pools, the port program already gets from the OS.
-
-So: nothing from `erl_driver` is needed. If in-process speed with
-non-blocking semantics is wanted, the answer is the asynchronous NIF shape
-above (`enif_send` from the runtime thread), not a driver.
-
-## What the port backend uses
-
-Plain Erlang ports: `Port.open` with `:spawn_executable`, `{:packet, 4}`,
-`:exit_status`, `[:nosuspend]` on `Port.command`, and `Port.close`. To
-kill a worker on deadline the missing piece is an OS-level launcher (or
-`:os.cmd("kill")` on the `:os_pid` from `Port.info`), not a driver API.
+Nothing from `erl_driver` is needed. The Port backend is an external **port
+program**, not a linked-in driver. It uses `Port.open`, `{:packet, 4}`,
+`:exit_status`, `Port.command` with `[:nosuspend]`, and `Port.close`.
+Its POSIX launcher owns worker-group termination and reaping. A linked-in
+driver would retain the NIF's memory-safety and lifecycle hazards; async NIF
+delivery already avoids blocking callers without introducing another API.

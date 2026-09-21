@@ -96,17 +96,25 @@ Outside the MVP promise; `BEAM_API.md` has the API specifics.
 - [x] (done) Monotonic condvar clock on Linux; wake-up bytes drained
       before parking, so a request withdrawn on deadline leaves no stale
       readable pipe.
-- [ ] Actual library pinning: a resource that owns the runtime, whose
-      destructor covers every thread; until the runtime can stop and join
-      its threads, document that loading pins nothing.
-- [ ] Checked initialisation: fail `load` when the runtime cannot start.
-- [ ] Cheap admission on the normal scheduler (`enif_schedule_nif`), with
+- [x] VM-lifetime library pin: a callback-bearing resource is retained
+      before thread creation. Purge cannot unmap live runtime code; the
+      pin deliberately does not reclaim the runtime (see next item).
+- [ ] Graceful unload: cooperative stop/join of every runtime thread and
+      allocation, followed by release of the pin. Requires upstream work;
+      not implemented or implied by the purge test.
+- [x] Checked initialization: post-load dirty-IO init checks setup and
+      waits for request-loop readiness, with a 30-second bound. Injected
+      failures before and after thread creation reject module loading.
+- [x] Cheap admission on the normal scheduler (`enif_schedule_nif`), with
       the dirty scheduler count from `:erlang.system_info/1` in `load_info`.
-- [ ] A deadline measured from the caller's side (`enif_monotonic_time`),
+- [x] A deadline measured from the caller's side (`enif_monotonic_time`),
       not from after validation and scheduling.
-- [ ] Asynchronous delivery (`enif_send` from the runtime thread) with
-      explicit ownership and caller monitoring.
-- [ ] A tested purge and shutdown policy.
+- [x] Asynchronous delivery (`enif_send` from the runtime thread) with
+      explicit ownership and caller monitoring. Generated functions still
+      return synchronously; the raw submit/cancel API is internal.
+- [x] A tested purge and VM-exit policy: native work replies after soft
+      purge, upgrade is refused without breaking the old binding, and the
+      disposable BEAM exits normally. This is OS reclamation, not joins.
 
 ## 5. Deferred
 

@@ -29,8 +29,7 @@ defmodule Bendler do
     * `:source` - the Bend file, relative to the project root
     * `:backend` - `:port` (default) runs an executable under the module's
       `start_link/1`; `:nif` loads a shared library into the VM (experimental:
-      no unload, a fatal runtime error freezes the module, callers wait on
-      dirty schedulers)
+      VM-lifetime pinning, no runtime unload, fatal errors freeze the module)
     * `:threads` - CPU threads for the Bend runtime, 1..128 (default: the
       schedulers online)
     * `:gpu` - port only: where `!` calls run. `:off` (default) keeps them
@@ -47,10 +46,10 @@ defmodule Bendler do
     * `:max_queue` - port: callers allowed to wait behind the one in flight
       (default 8); beyond it a call raises `Bendler.Error` with reason `:busy`
     * `:max_waiting` - NIF: callers admitted at once, waiting or in flight
-      (default 4), each holding a dirty CPU scheduler thread; beyond it a
-      call raises `Bendler.Error` with reason `:busy`. Admission happens on
-      the dirty scheduler, so with every dirty scheduler busy the call waits
-      for one first.
+      (default 4); beyond it a call raises `Bendler.Error` with reason
+      `:busy` on the normal scheduler. Only frame validation/copying uses a
+      dirty CPU scheduler; waiting for Bend is an ordinary process receive.
+      Abandoned running work retains its slot until computation finishes.
 
   A generated function returns the value, or raises `Bendler.Error` with a
   `reason` of `:busy`, `:timeout`, `:exited` (the port died), `:dead` (the
@@ -156,7 +155,6 @@ defmodule Bendler do
 
   @doc false
   def loader(%{backend: :nif} = cfg, name) do
-    ms = if cfg.timeout == :infinity, do: -1, else: cfg.timeout
     # load_nif receives the library stem and adds the platform extension.
     artifact = Bendler.Build.artifact_relative_path(name, :nif) |> String.trim_trailing(".so")
 
@@ -166,23 +164,30 @@ defmodule Bendler do
       def __bendler_load__ do
         path = Path.join(:code.priv_dir(unquote(cfg.otp_app)), unquote(artifact))
 
-        :erlang.load_nif(
-          String.to_charlist(path),
-          {unquote(cfg.threads), unquote(cfg.max_waiting)}
-        )
+        with :ok <-
+               :erlang.load_nif(
+                 String.to_charlist(path),
+                 {unquote(cfg.threads), unquote(cfg.max_waiting),
+                  :erlang.system_info(:dirty_cpu_schedulers_online)}
+               ) do
+          __bendler_init__()
+        end
       end
 
       @doc false
-      def __bendler_call(_frame, _timeout_ms), do: :erlang.nif_error(:bendler_not_loaded)
+      def __bendler_init__, do: :erlang.nif_error(:bendler_not_loaded)
 
-      defp __bendler_send__(frame) do
-        try do
-          __bendler_call(frame, unquote(ms))
-        rescue
-          e in ErlangError -> {:bendler_raised, e, __STACKTRACE__}
-        end
-        |> Bendler.unwrap()
-      end
+      @doc false
+      def __bendler_submit(_frame, _deadline, _ref), do: :erlang.nif_error(:bendler_not_loaded)
+
+      @doc false
+      def __bendler_cancel(_handle), do: :erlang.nif_error(:bendler_not_loaded)
+
+      @doc false
+      def __bendler_call(frame, timeout_ms),
+        do: Bendler.Nif.call(__MODULE__, frame, Bendler.Nif.deadline(timeout_ms))
+
+      defp __bendler_deadline__, do: Bendler.Nif.deadline(unquote(cfg.timeout))
     end
   end
 
@@ -214,7 +219,7 @@ defmodule Bendler do
         %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
       end
 
-      defp __bendler_send__(frame), do: Bendler.Port.call(__MODULE__, frame)
+      defp __bendler_deadline__, do: nil
     end
   end
 
@@ -232,11 +237,34 @@ defmodule Bendler do
     raise Bendler.Error, message: "#{fun}: the request was refused: #{why}", reason: :refused
   end
 
-  def result({:error, reason}, fun) when reason in [:busy, :timeout, :exited, :nomem] do
+  def result({:error, reason}, fun) when reason in [:busy, :timeout, :exited, :nomem, :dead] do
     raise Bendler.Error, message: "#{fun}: #{reason}", reason: reason
   end
 
   def result(bin, fun) when is_binary(bin), do: Bendler.Codec.reply(bin, fun)
+
+  # Keep the telemetry closure in this stable module. A failed load of an
+  # identical BEAM can invalidate local fun entries in the target module.
+  @doc false
+  @spec invoke(module(), atom(), :port | :nif, Bendler.Nif.deadline() | nil, tuple()) :: term()
+  def invoke(module, fun, backend, deadline, {index, pairs, codec, return_type}) do
+    Bendler.Telemetry.span(module, fun, backend, fn ->
+      frame = Bendler.Codec.request(index, pairs, codec)
+      reply = send_frame(backend, module, frame, deadline)
+      Bendler.Codec.check(result(reply, fun), return_type, fun, codec)
+    end)
+  end
+
+  defp send_frame(:port, module, frame, _deadline), do: Bendler.Port.call(module, frame)
+
+  defp send_frame(:nif, module, frame, deadline) do
+    try do
+      Bendler.Nif.call(module, frame, deadline)
+    rescue
+      e in ErlangError -> {:bendler_raised, e, __STACKTRACE__}
+    end
+    |> unwrap()
+  end
 
   @doc false
   def define(
@@ -258,23 +286,18 @@ defmodule Bendler do
       @doc "Bend: `#{unquote(sig_text)}` (line #{unquote(sig.line)})."
       @spec unquote(fname)(unquote_splicing(types)) :: unquote(ret_spec)
       def unquote(fname)(unquote_splicing(vars)) do
-        Bendler.Telemetry.span(__MODULE__, unquote(fname), unquote(backend), fn ->
-          frame =
-            Bendler.Codec.request(
-              unquote(index),
-              unquote(
-                Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
-              ),
-              unquote(Macro.escape(codec))
-            )
+        deadline = __bendler_deadline__()
 
-          Bendler.Codec.check(
-            Bendler.result(__bendler_send__(frame), unquote(fname)),
-            unquote(Macro.escape(ret_t)),
-            unquote(fname),
-            unquote(Macro.escape(codec))
-          )
-        end)
+        Bendler.invoke(
+          __MODULE__,
+          unquote(fname),
+          unquote(backend),
+          deadline,
+          {unquote(index),
+           unquote(
+             Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
+           ), unquote(Macro.escape(codec)), unquote(Macro.escape(ret_t))}
+        )
       end
     end
   end
