@@ -408,7 +408,19 @@ defmodule Bendler do
         end
       end
 
-    [call | stream_fun(sig, fname, index, vars, args, codec, ret_t, ret_spec, types, sig_text)]
+    ctx = %{
+      fname: fname,
+      index: index,
+      vars: vars,
+      args: args,
+      codec: codec,
+      ret_spec: ret_spec,
+      types: types,
+      sig_text: sig_text,
+      ret_t: ret_t
+    }
+
+    [call | stream_fun(sig, ctx)]
   end
 
   defp doc_tail(%Bendler.Sig{emitter: nil}), do: ""
@@ -418,21 +430,12 @@ defmodule Bendler do
       ", whose events are discarded: the first `#{e.name}` is answered `False`, " <>
         "so the def stops early. Use the `_stream` function to receive them"
 
-  defp stream_fun(%Bendler.Sig{emitter: nil}, _, _, _, _, _, _, _, _, _), do: []
+  defp stream_fun(%Bendler.Sig{emitter: nil}, _ctx), do: []
 
-  defp stream_fun(
-         %Bendler.Sig{emitter: e},
-         fname,
-         index,
-         vars,
-         args,
-         codec,
-         ret_t,
-         ret_spec,
-         types,
-         sig_text
-       ) do
-    sname = :"#{fname}_stream"
+  defp stream_fun(%Bendler.Sig{emitter: e}, ctx) do
+    %{vars: vars, args: args, codec: codec, ret_spec: ret_spec, types: types} = ctx
+    %{sig_text: sig_text, index: index, ret_t: ret_t} = ctx
+    sname = :"#{ctx.fname}_stream"
     event_spec = Bendler.Sig.typespec(e.type)
 
     [

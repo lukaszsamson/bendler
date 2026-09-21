@@ -1,7 +1,7 @@
 defmodule Bendler.Demos.RaytraceTest do
   use ExUnit.Case, async: false
 
-  alias Bendler.Demos.Raytrace.Png
+  alias Bendler.Demos.Raytrace.{Apng, Png}
   alias Bendler.Demos.RaytracePort
   alias Bendler.Demos.RaytraceReference
 
@@ -206,5 +206,88 @@ defmodule Bendler.Demos.RaytraceTest do
     {_, _, a} = RaytracePort.render(scene, 96, 72, lane: :gpu)
     {_, _, b} = RaytracePort.render(scene, 96, 72)
     assert a == b
+  end
+
+  # The fly-through: one call, many frames, each emitted as it finishes
+  # =================================================================
+
+  defp frames(stream) do
+    Stream.flat_map(stream, fn
+      {:event, rgb} -> [rgb]
+      {:done, _} -> []
+    end)
+  end
+
+  test "a fly-through emits whole frames of the right size, the first one being render/4's" do
+    start_supervised!({RaytracePort, threads: 4})
+    scene = RaytracePort.default_scene()
+
+    list = RaytracePort.fly(scene, 64, 48, 6) |> Enum.to_list()
+    assert List.last(list) == {:done, 6}
+    [{:event, rgb} | _] = list
+    assert byte_size(rgb) == 64 * 48 * 3
+
+    # frame 0 is the untouched scene, so it is exactly what render/4 draws
+    assert {64, 48, rgb} == RaytracePort.render(scene, 64, 48)
+    # and the camera really turns: later frames differ
+    assert length(Enum.uniq(Enum.to_list(frames(RaytracePort.fly(scene, 32, 24, 4))))) == 4
+  end
+
+  test "a fly-through can be cancelled and the port serves the next call" do
+    start_supervised!({RaytracePort, threads: 4})
+    scene = RaytracePort.default_scene()
+
+    taken = RaytracePort.fly(scene, 32, 24, 10_000) |> frames() |> Enum.take(3)
+    assert length(taken) == 3
+    assert RaytracePort.upstream_checksum(3, 40) == 19_281
+  end
+
+  test "save_apng/6 writes a parseable animated PNG whose frames match the stream" do
+    start_supervised!({RaytracePort, threads: 4})
+    scene = RaytracePort.default_scene()
+    path = Path.join(System.tmp_dir!(), "bendler_fly_#{System.unique_integer([:positive])}.png")
+    on_exit(fn -> File.rm(path) end)
+
+    assert RaytracePort.save_apng(path, scene, 48, 36, 5) == 5
+    types = path |> File.read!() |> Apng.chunks() |> Enum.map(&elem(&1, 0))
+
+    assert Enum.take(types, 3) == ["IHDR", "acTL", "fcTL"]
+    assert List.last(types) == "IEND"
+    assert Enum.count(types, &(&1 == "fcTL")) == 5
+    assert Enum.count(types, &(&1 == "IDAT")) == 1
+    assert Enum.count(types, &(&1 == "fdAT")) == 4
+
+    # acTL announces exactly the frames that arrived
+    {"acTL", <<count::32, plays::32>>} =
+      path |> File.read!() |> Apng.chunks() |> List.keyfind("acTL", 0)
+
+    assert {count, plays} == {5, 0}
+  end
+
+  test "a cancelled fly-through leaves an animated PNG with the frames it got" do
+    start_supervised!({RaytracePort, threads: 4})
+    scene = RaytracePort.default_scene()
+    path = Path.join(System.tmp_dir!(), "bendler_cut_#{System.unique_integer([:positive])}.png")
+    on_exit(fn -> File.rm(path) end)
+
+    assert RaytracePort.save_apng(path, scene, 32, 24, 10_000, take: 2) == 2
+
+    {"acTL", <<2::32, 0::32>>} =
+      path |> File.read!() |> Apng.chunks() |> List.keyfind("acTL", 0)
+
+    assert RaytracePort.upstream_checksum(3, 40) == 19_281
+  end
+
+  @tag skip:
+         if(@gpu_available,
+           do: false,
+           else: "requires a macOS build with #{Path.basename(@gpu_artifact)}"
+         )
+  test "the GPU lane renders the same fly-through frames as the CPU lane" do
+    start_supervised!({RaytracePort, threads: 4, gpu: :on, timeout: 120_000})
+    scene = RaytracePort.default_scene()
+    gpu = RaytracePort.fly(scene, 64, 48, 3, lane: :gpu) |> frames() |> Enum.to_list()
+    cpu = RaytracePort.fly(scene, 64, 48, 3) |> frames() |> Enum.to_list()
+    assert gpu == cpu
   end
 end

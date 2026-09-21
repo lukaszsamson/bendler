@@ -123,3 +123,122 @@ end
 measure.("elixir reference #{ref_w}x#{ref_h}", fn ->
   RaytraceReference.render(scene, ref_w, ref_h)
 end)
+
+# The fly-through: one call, many frames, each acknowledged
+# =========================================================
+#
+# FLY_FRAMES=24 FLY_WIDTH=320 FLY_HEIGHT=240 override the size of this
+# section, which is smaller than the single-image one above because it
+# renders every frame.
+
+fly_frames = String.to_integer(System.get_env("FLY_FRAMES", "24"))
+fly_w = String.to_integer(System.get_env("FLY_WIDTH", "320"))
+fly_h = String.to_integer(System.get_env("FLY_HEIGHT", "240"))
+
+frames_of = fn stream ->
+  Stream.flat_map(stream, fn
+    {:event, rgb} -> [rgb]
+    {:done, _} -> []
+  end)
+end
+
+IO.puts("\nfly-through #{fly_w}x#{fly_h} frames=#{fly_frames}\n")
+
+{:ok, pid} = RaytracePort.start_link(threads: cores)
+
+try do
+  # time to the first frame: the whole turn is one call, so this is the
+  # render of frame 0 plus one event round trip, not the whole turn
+  measure.("fly: time to first frame", fn ->
+    scene |> RaytracePort.fly(fly_w, fly_h, fly_frames) |> frames_of.() |> Enum.take(1)
+  end)
+
+  # per-frame latency: the gaps between consecutive frames arriving
+  gaps =
+    scene
+    |> RaytracePort.fly(fly_w, fly_h, fly_frames)
+    |> frames_of.()
+    |> Enum.reduce({System.monotonic_time(:microsecond), []}, fn _, {t, acc} ->
+      now = System.monotonic_time(:microsecond)
+      {now, [(now - t) / 1000 | acc]}
+    end)
+    |> elem(1)
+    |> Enum.sort()
+
+  IO.puts(
+    "#{String.pad_trailing("fly: per-frame latency", 38)} " <>
+      "median=#{Float.round(Enum.at(gaps, div(length(gaps), 2)), 3)} ms " <>
+      "min=#{Float.round(hd(gaps), 3)} max=#{Float.round(List.last(gaps), 3)}"
+  )
+
+  # the acknowledgement round trip: one call emitting N frames against N
+  # separate whole-image calls of the same size. The difference is the
+  # per-frame request/reply the events replace, minus the ack they add.
+  measure.("fly: #{fly_frames} frames in one call", fn ->
+    scene |> RaytracePort.fly(fly_w, fly_h, fly_frames) |> Enum.to_list()
+  end)
+
+  measure.("fly: #{fly_frames} separate render calls", fn ->
+    for _ <- 1..fly_frames,
+        do: RaytracePort.render_tile(scene, fly_w, fly_h, 0, 0, fly_w, fly_h)
+  end)
+
+  # cancellation latency: from the third frame of a 100000-frame turn
+  # arriving to the port answering a trivial call again. The `Enum.take`
+  # refuses the next event and waits for the def to return inside it.
+  cancels =
+    for _ <- 1..samples do
+      last =
+        scene
+        |> RaytracePort.fly(fly_w, fly_h, 100_000)
+        |> frames_of.()
+        |> Stream.map(fn _ -> System.monotonic_time(:microsecond) end)
+        |> Enum.take(3)
+        |> List.last()
+
+      19_281 = RaytracePort.upstream_checksum(3, 40)
+      (System.monotonic_time(:microsecond) - last) / 1000
+    end
+    |> Enum.sort()
+
+  IO.puts(
+    "#{String.pad_trailing("fly: cancel to next call answered", 38)} " <>
+      "median=#{Float.round(Enum.at(cancels, div(samples, 2)), 3)} ms " <>
+      "min=#{Float.round(hd(cancels), 3)} max=#{Float.round(List.last(cancels), 3)}"
+  )
+
+  measure.("fly: save_apng #{fly_frames} frames", fn ->
+    path = Path.join(System.tmp_dir!(), "bendler_bench_fly.png")
+    RaytracePort.save_apng(path, scene, fly_w, fly_h, fly_frames)
+    File.rm(path)
+  end)
+after
+  GenServer.stop(pid)
+end
+
+# The GPU lane, when this build has a device program beside the executable.
+# One bang per frame, at a smaller size: macOS aborts a Metal command
+# buffer that holds the device too long ("Impacting Interactivity"), and a
+# whole 320x240 frame in one bang is past that limit here. GPU_FLY_WIDTH
+# and GPU_FLY_HEIGHT override it.
+gpu_sidecar = Bendler.Build.artifact_path(:bendler, "bendler_demos_raytrace_port", :port) <> ".gpu"
+gpu_w = String.to_integer(System.get_env("GPU_FLY_WIDTH", "128"))
+gpu_h = String.to_integer(System.get_env("GPU_FLY_HEIGHT", "96"))
+
+if File.regular?(gpu_sidecar) do
+  {:ok, pid} = RaytracePort.start_link(threads: cores, gpu: :on, timeout: 600_000)
+
+  try do
+    measure.("fly: #{fly_frames} frames #{gpu_w}x#{gpu_h} CPU", fn ->
+      scene |> RaytracePort.fly(gpu_w, gpu_h, fly_frames) |> Enum.to_list()
+    end)
+
+    measure.("fly: #{fly_frames} frames #{gpu_w}x#{gpu_h} GPU", fn ->
+      scene |> RaytracePort.fly(gpu_w, gpu_h, fly_frames, lane: :gpu) |> Enum.to_list()
+    end)
+  after
+    GenServer.stop(pid)
+  end
+else
+  IO.puts("\n(no #{Path.basename(gpu_sidecar)}: the GPU lane is not measured here)")
+end

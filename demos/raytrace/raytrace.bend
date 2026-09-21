@@ -732,3 +732,84 @@ def render_tiles_gpu(
   +scene: Scene, +w: U32, +h: U32, tiles: List<(U32 & U32 & U32 & U32)>
 ) -> List<B.Bytes>:
   tiles_fork!(64n, to_rects(tiles), scene, w, h)
+
+# The fly-through
+# ===============
+#
+# One call renders many frames and emits each as it finishes. The camera
+# orbits the scene centre while the light stays where it is in the world,
+# which in the tracer's fixed +z camera is the world turning about the
+# vertical axis through (cx, cz) -- spheres and light together, so their
+# relative geometry (and therefore the shading) is unchanged and only the
+# view moves. Nothing of the tracer is duplicated: a frame is the whole
+# image as one `render_tile`, whose rows already fork as a balanced tree.
+
+def rot_vec(p: Vec, +ct: F32, +sn: F32, +cx: F32, +cz: F32) -> Vec:
+  match p:
+    case Vec{x, y, z}:
+      +dx = F32.sub(x, cx)
+      +dz = F32.sub(z, cz)
+      Vec{F32.add(cx, F32.sub(F32.mul(dx, ct), F32.mul(dz, sn))), y,
+          F32.add(cz, F32.add(F32.mul(dx, sn), F32.mul(dz, ct)))}
+
+def rot_sphere(s: Sphere, +ct: F32, +sn: F32, +cx: F32, +cz: F32) -> Sphere:
+  match s:
+    case Sphere{c, r, col, m}:
+      Sphere{rot_vec(c, ct, sn, cx, cz), r, col, m}
+
+def rot_spheres(xs: List<&2, Sphere>, +ct: F32, +sn: F32, +cx: F32, +cz: F32) ->
+  List<&2, Sphere>:
+  match xs:
+    case Nil{}:
+      Nil{}
+    case s <> rest:
+      rot_sphere(s, ct, sn, cx, cz) <> rot_spheres(rest, ct, sn, cx, cz)
+
+def rot_scene(scene: Scene, +ct: F32, +sn: F32, +cx: F32, +cz: F32) -> Scene:
+  match scene:
+    case Scene{sps, light, eye, sky}:
+      Scene{rot_spheres(sps, ct, sn, cx, cz), rot_vec(light, ct, sn, cx, cz), eye, sky}
+
+# frame i of `frames` covers i/frames of one full turn
+def frame_angle(+i: U32, +frames: U32) -> F32:
+  F32.div(F32.mul(F32.mul(U32.to_f32(2), F32.pi()), U32.to_f32(i)), U32.to_f32(frames))
+
+def turned(scene: Scene, +i: U32, +frames: U32, +cx: F32, +cz: F32) -> Scene:
+  +a = frame_angle(i, frames)
+  rot_scene(scene, F32.cos(a), F32.sin(a), cx, cz)
+
+def fly.go(~emit: B.Bytes -> IO(Bool), +scene: Scene, n: Nat, +i: U32, +frames: U32,
+           +w: U32, +h: U32, +cx: F32, +cz: F32, ok: Bool) -> IO(U32):
+  match n ok:
+    case 0n o:
+      IO.pure(U32, i)
+    case 1n+p False{}:
+      IO.pure(U32, i)
+    case 1n+p True{}:
+      do IO<U32>:
+        ok2 : Bool <- emit(render_tile(turned(scene, i, frames, cx, cz), w, h, 0, 0, w, h))
+        fly.go(~emit, scene, p, U32.add(i, 1), frames, w, h, cx, cz, ok2)
+
+# Renders `frames` frames of one turn about (cx, cz) and emits each as
+# packed RGB bytes; answers how many it emitted. A `False` from the
+# consumer ends the turn early.
+def fly(~emit: B.Bytes -> IO(Bool), +scene: Scene, +w: U32, +h: U32, +frames: U32,
+        +cx: F32, +cz: F32) -> IO(U32):
+  fly.go(~emit, scene, U32.to_nat(frames), 0, frames, w, h, cx, cz, True{})
+
+def fly_gpu.go(~emit: B.Bytes -> IO(Bool), +scene: Scene, n: Nat, +i: U32, +frames: U32,
+               +w: U32, +h: U32, +cx: F32, +cz: F32, ok: Bool) -> IO(U32):
+  match n ok:
+    case 0n o:
+      IO.pure(U32, i)
+    case 1n+p False{}:
+      IO.pure(U32, i)
+    case 1n+p True{}:
+      do IO<U32>:
+        ok2 : Bool <- emit(render_tile!(turned(scene, i, frames, cx, cz), w, h, 0, 0, w, h))
+        fly_gpu.go(~emit, scene, p, U32.add(i, 1), frames, w, h, cx, cz, ok2)
+
+# the same on the GPU: one bang per frame, whose row fork fills the lanes
+def fly_gpu(~emit: B.Bytes -> IO(Bool), +scene: Scene, +w: U32, +h: U32, +frames: U32,
+            +cx: F32, +cz: F32) -> IO(U32):
+  fly_gpu.go(~emit, scene, U32.to_nat(frames), 0, frames, w, h, cx, cz, True{})
