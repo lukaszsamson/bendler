@@ -283,19 +283,18 @@ defmodule Bendler.Port do
 
   def handle_info({:EXIT, _, reason}, s), do: {:stop, reason, s}
 
-  # the one-byte acknowledgement frame the worker is parked on
+  # The one-byte acknowledgement frame the worker is parked on. Unlike a
+  # request, this cannot be abandoned: the worker is mid-request and would
+  # still answer it, so a port that will not take five bytes stops the
+  # owner rather than letting the frames drift apart.
   defp answer(go, %{inflight: req} = s) do
     case send_frame(s.port, <<if(go, do: 1, else: 0)>>) do
       :ok ->
         {:noreply, s}
 
-      :busy ->
-        finish(req, {:error, :busy})
-        drain(%{s | inflight: nil})
-
-      :closed ->
+      reason ->
         finish(req, {:error, :exited})
-        {:stop, {:shutdown, :port_closed}, %{s | inflight: nil}}
+        {:stop, {:shutdown, {:ack_failed, reason}}, %{s | inflight: nil}}
     end
   end
 
