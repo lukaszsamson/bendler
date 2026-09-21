@@ -1,5 +1,73 @@
 # Validation record
 
+## 2026-09-21: typed NIF ask callbacks
+
+On the same local macOS arm64 toolchain as below:
+
+- Full `mix test --warnings-as-errors --seed 123`: **198 passed**. Eight NIF
+  ask tests replace the old NIF-ask rejection test and cover repeated callbacks,
+  direct reentry, CSV tuple/Result/Maybe/Bytes responses, stale sequence,
+  foreign owner, malformed native replies, handler errors and invalid values,
+  total/handler deadlines, caller death, handler cleanup and module isolation.
+- Failed or abandoned asks freeze their module intentionally: the runtime has
+  no safe typed request unwind. Tests confirm a separate module keeps serving.
+  Typed CSV file errors remain normal data and subsequent calls succeed.
+- Strict core and explicit nine-file demo Credo, dev/library Dialyzer (zero errors), root and explicit demo
+  formatting, documentation warnings-as-errors, isolated lifecycle,
+  initialization-failure and scheduler-admission checks passed.
+- The final rebuild again passed all 198 tests; the extended isolated lifecycle
+  probe confirms typed ask calls survive a refused upgrade. The Port ask ASan
+  harness passed repeated callbacks, input reallocations, typed errors, reuse
+  and malformed-reply refusal. This is not NIF sanitizer coverage.
+- Five warm CSV samples, 100k rows / 233 asks / 16 KiB chunks: NimbleCSV
+  77.602 ms, host-driven Port 340.329 ms, ask-Port 214.994 ms, ask-NIF 229.942 ms.
+  All aggregates agree. See `demos/csv/ASK.md` for the smaller size and method.
+
+This adds no NIF sanitizer/soak evidence or Linux evidence. The historical
+unexplained Port status-74 failures below remain unresolved; this passing run
+does not establish their cause or fix them.
+
+## 2026-09-21: experimental NIF emit streams and particle demo
+
+Local macOS arm64 / Apple M2 Pro, Bend 2.0.20, Elixir 1.20.3 and OTP 28:
+
+- Final full `mix test --warnings-as-errors --seed 123`: **191 passed**.
+  Fourteen added tests cover NIF events and the particle demo. Event tests cover
+  pure/IO-only/plain calls, scalar/tuple/datatype payloads, ordering, backpressure,
+  early halt, consumer exceptions, repeated enumeration, caller death, native
+  paused deadlines, lazy admission, stale/duplicate acknowledgements, 100
+  cancellation races, bounded admission and fatal-module isolation.
+- The native deadline test initially failed. Tracing showed
+  `enif_monotonic_time` returning `ERL_NIF_TIME_ERROR` on the Bend pthread.
+  Admission now translates the BEAM deadline into OS monotonic time on the
+  scheduler. The parked-deadline test passes without any consumer ack/wake.
+- Port/NIF particle snapshots are identical, and a single oscillator agrees
+  with the integration rule. A 16-particle, 180-tick SVG was generated and
+  rasterized for visual inspection. Output is streamed, not accumulated.
+- Five warmed 2,000-event samples: scalar pulse 20.49 µs/event via Port versus
+  11.50 via NIF; 64-particle snapshots 245.89 versus 243.05 µs/event. Payload
+  counts/checksums and final results agree. File output is excluded. Full
+  methodology and cancellation-barrier timings are in `demos/particles/README.md`.
+- Dev/library Dialyzer: zero errors. Core strict Credo and explicit linting of
+  six demo files passed. Formatting and documentation with warnings as errors
+  passed. The demo modules are test-only and not part of dev Dialyzer analysis.
+- Isolated lifecycle script: original calls and both pre-created/new streams
+  survive refused upgrades; active-work reply after purge and normal VM exit
+  pass. Lazy closures stay in the stable helper module. Initialization failure
+  probes and scheduler saturation/reserved-admission cleanup pass. The init
+  probe was updated to declare the two new native entry points.
+
+**Unresolved Port flake:** two earlier full runs each saw an exit status 74,
+once in event early cancellation and once in Murmur batch hashing. The event
+test passed two isolated reruns; full-suite seeds 999157 and 123 subsequently
+passed (the final 191-test run used 123). No cause was established and no Port
+transport fix is claimed. This must not be described as repeated clean runs.
+
+No remote CI/Linux run, NIF sanitizer instrumentation, long-duration soak or
+hard-cancellation guarantee is claimed. At this earlier checkpoint NIF ask
+callbacks were out of scope (now added above); concurrent effect
+activations, windowed acknowledgements and safe unload remain out of scope.
+
 ## 2026-09-21: review fixes and Port ask callbacks
 
 Local macOS arm64, Apple M2 Pro, Bend 2.0.20, Elixir 1.20.3 and OTP 28:

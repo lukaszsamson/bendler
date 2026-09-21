@@ -123,6 +123,9 @@ defmodule Bendler.NifInitCheck do
 
           def __bendler_init__, do: :erlang.nif_error(:not_loaded)
           def __bendler_submit(_, _, _), do: :erlang.nif_error(:not_loaded)
+          def __bendler_subscribe(_, _, _), do: :erlang.nif_error(:not_loaded)
+          def __bendler_ack(_, _, _), do: :erlang.nif_error(:not_loaded)
+          def __bendler_answer(_, _, _), do: :erlang.nif_error(:not_loaded)
           def __bendler_cancel(_), do: :erlang.nif_error(:not_loaded)
         end
       end

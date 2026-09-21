@@ -4,7 +4,7 @@
 
 Public repository: [github.com/lukaszsamson/bendler](https://github.com/lukaszsamson/bendler)
 
-New Port demo: [ask-driven CSV aggregation](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md). A typed
+New demo: [ask-driven CSV aggregation](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md), over Port and experimental NIF. A typed
 `~ask: Request -> IO(Response)` callback pulls host-owned input while parser
 state and rows stay in Bend. Its generated Elixir function takes a final
 unary handler argument. Ask and emit cannot yet be combined in one export.
@@ -189,8 +189,18 @@ early (`Enum.take/2`), an exception in the consumer, and the consumer's
 death all end the turn and free the port. Events are type-checked like
 replies. Write the emitter with `~` (Bend's template marker) whenever the
 def emits more than once: a Bend function type is Type-kinded, so a
-closure binder can never be reusable. Events are a **port** feature; under
-`backend: :nif` an `IO(T)` export is refused at build time.
+closure binder can never be reusable. Events now also work under experimental
+`backend: :nif`. Typed `ask` callbacks also work experimentally, but an
+abandoned/failed NIF callback freezes that module until VM restart; use typed
+`Result.Fail` for recoverable application errors. Port remains recommended.
+NIF events use
+sequence-tagged messages and acknowledgements instead of Port frames.
+Early NIF stream termination returns after cancelling delivery; the native
+admission slot remains occupied until the def cooperatively finishes.
+
+The [particle tick demo](https://github.com/lukaszsamson/bendler/blob/main/demos/particles/README.md)
+runs the same simulation on Port and NIF, writes SVG trajectories, and measures
+scalar-event overhead separately from simulation and payload costs.
 
 The [raytracer demo](demos/raytrace/README.md)'s `fly` is the worked
 example: one call renders a whole camera turn and each frame arrives in
@@ -214,8 +224,8 @@ restarts it), `:dead` (the NIF runtime hit a fatal error and is frozen) or
   NIF admission → dirty validation ─▶ Bendler.fn()    (foreign effect: waits for a frame)
    or Port ({:packet, 4}) ────────▶    Bendler.arg(T)  (foreign effect: decodes one argument)
                                         M.fib(n, a, b)  (the user's def, on every core)
-  ◀── event frame (tag 16) ◀────────   Bendler.emit(T, x)  (port only: writes, then waits
-    ── ack byte (1 go on / 0 stop) ─▶                        for the host's answer as a Bool)
+  ◀── event frame/message ◀────────   Bendler.emit(T, x)  (writes, then waits
+    ── acknowledgement ───────────▶                        for the host's answer as a Bool)
   ◀──────────── reply frame ◀────────  Bendler.reply(T, x) (foreign effect: encodes the result)
 ```
 

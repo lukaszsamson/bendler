@@ -31,6 +31,27 @@ claim that the NIF backend is production-safe.
 
 ## Investigation status (2026-09-21)
 
+### Event extension
+
+Sequential emit exports now have NIF parity: resource-scoped, sequence-tagged
+messages, one outstanding event, acknowledgements on the normal scheduler and
+an IO-loop wake-up. A parked finite deadline is enforced natively. Admission
+is retained until cooperative completion even if the caller has cancelled.
+The particle demo compares this with Port and separately measures scalar events.
+Typed ask responses are now experimental too: replies are validated on a dirty
+CPU scheduler and delivered to the parked IO continuation. A failed/abandoned
+ask freezes its module because the runtime has no safe request unwind. Typed
+Result failures are recoverable data. Parallel effect activations remain unsupported.
+
+The extension exposed a pre-existing clock error: `enif_monotonic_time` is
+scheduler-only, so runtime pthread checks received `ERL_NIF_TIME_ERROR`. Native
+admission now converts the remaining BEAM duration into an OS monotonic
+deadline. Lazy-stream closures live in the stable Bendler.Nif helper, not in the
+reload-refused target module. The isolated lifecycle script checks both existing
+and newly created streams after a refused upgrade. This is not upgrade support.
+
+### Original lifecycle audit
+
 The lifecycle audit is complete, against OTP 28's local `erl_nif.md` and
 `erl_nif.c`. Key constraints for implementation:
 

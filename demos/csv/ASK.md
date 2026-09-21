@@ -1,4 +1,4 @@
-# Ask-driven CSV aggregation (Port only)
+# Ask-driven CSV aggregation (Port and experimental NIF)
 
 This complements the host-driven `CsvStream.parse_stream/2` demo. One Bend
 invocation owns the parser cursor and aggregate, asks Elixir for input, and
@@ -39,6 +39,17 @@ Handlers run in fresh processes, so raw file handles and process-dictionary
 state must not be shared with them. Use a host-owned IO device/GenServer/ETS
 table for state. Offsets make this particular handler stateless.
 
+`Bendler.Demos.CsvAskNif.aggregate/4` accepts the same arguments and handler,
+without starting a Port supervisor. It intentionally exposes only the low-level
+binding; own the non-raw IO device with `File.open!/3` in the caller. The benchmark
+below exercises both transports with the same file and checks identical totals.
+
+**NIF caveat:** handler exceptions, invalid return values, timeout or caller
+death while waiting for a callback permanently freeze this NIF module. There is
+no safe request unwind and no module restart without restarting the VM. Typed
+file/parser errors (`Result.Fail`) are ordinary data and keep it usable. Prefer
+Port for restartable failures. This demo does not make parsing parallel.
+
 ## Bounds and failure semantics
 
 - One outstanding ask, no speculative input reads and no event mailbox.
@@ -70,25 +81,27 @@ MIX_ENV=test mix run demos/csv/check_ask_asan.exs
 ```
 
 Apple M2 Pro, macOS arm64, Elixir 1.20.3 / OTP 28 / Bend 2.0.20. Five warmed
-samples, median wall time, one Bend CPU worker, 16 KiB chunks. All three
+samples, median wall time, one Bend CPU worker, 16 KiB chunks. All four
 paths read the same file and verify the same aggregate. Fixture creation is
 excluded; file IO, callback processes and encoding are included. The ask
 wrapper uses a non-raw file device; the other paths use `File.stream!`.
 
-| Records | NimbleCSV | Host-driven Port | Ask-driven Port | Asks including EOF |
-|---:|---:|---:|---:|---:|
-| 10,000 | 7.017 ms | 26.055 ms | 18.522 ms | 24 |
-| 100,000 | 85.805 ms | 265.978 ms | 193.700 ms | 233 |
+| Records | NimbleCSV | Host-driven Port | Ask-driven Port | Ask-driven NIF | Asks including EOF |
+|---:|---:|---:|---:|---:|---:|
+| 10,000 | 8.422 ms | 73.513 ms | 57.077 ms | 48.732 ms | 24 |
+| 100,000 | 77.602 ms | 340.329 ms | 214.994 ms | 229.942 ms | 233 |
 
-Ask-driven aggregation was about 27% faster than the host-driven Bend path at
-100k rows, but about 2.26 times slower than NimbleCSV. This demonstrates the
+Ask-Port aggregation was about 37% faster than the host-driven Bend path at
+100k rows, but about 2.77 times slower than NimbleCSV. Ask-NIF was about 7%
+slower than ask-Port at that size (15% faster at 10k). There is no consistent
+NIF win here; callback transport is only part of the workload. This demonstrates the
 value of avoiding row transfer, not a reason to replace NimbleCSV. No peak-RSS
 or isolated callback-latency measurement is claimed.
 
 ## Deliberately deferred
 
-Only Port supports ask. An export has one callback channel, ask **or** emit,
+An export has one callback channel, ask **or** emit,
 not both. `ask` is currently a reserved callback parameter name. Multiple
-handlers, configurable handler deadlines, NIF callbacks/events and concurrent
-native requests are not included. The next useful workload is batched graph
+handlers, configurable handler deadlines, recoverable NIF callback abandonment
+and concurrent native requests are not included. The next useful workload is batched graph
 expansion over host-owned data, where Bend decides what data to request.

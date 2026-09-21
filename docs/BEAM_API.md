@@ -76,7 +76,7 @@ the module. Normal VM exit relies on OS reclamation, not graceful thread joins.
 | Entry | `ERL_NIF_INIT`, load/upgrade callbacks | configuration checks, upgrade refusal |
 | Resources | `enif_open_resource_type[_x]`, `enif_alloc_resource`, `enif_make_resource`, `enif_get_resource`, `enif_keep_resource`, `enif_release_resource` | pin and request ownership |
 | Scheduling | `enif_schedule_nif`, dirty IO init | validation/copying and bounded readiness wait |
-| Time | `enif_monotonic_time` | absolute BEAM monotonic milliseconds |
+| Time | `enif_monotonic_time`, POSIX `clock_gettime` | translate BEAM deadline on scheduler; native thread uses OS monotonic time |
 | Monitoring | `enif_self`, `enif_monitor_process`, `enif_demonitor_process` | caller-death cleanup |
 | Delivery | `enif_alloc_env`, `enif_make_copy`, `enif_send`, `enif_free_env` | independent reference/reply lifetimes |
 | Terms | binary inspection/construction, integer/reference checks, tuples/atoms | frame envelope and errors |
@@ -87,8 +87,22 @@ is configured independently because it no longer occupies dirty schedulers
 while waiting. Runtime pthreads remain; wrapping them with `enif_thread_*`
 would not make the upstream pool stoppable.
 
+Typed NIF emit streams now reuse independent environments, monitored request
+resources and `enif_send`. A normal-scheduler acknowledgement checks resource
+ownership with `enif_compare_pids` and a sequence number, then wakes the Bend
+IO loop. A parked event consumes no BEAM scheduler. Only one event is outstanding.
+
+Important API restriction found by the paused-event test:
+`enif_monotonic_time` returns `ERL_NIF_TIME_ERROR` outside scheduler threads.
+The old runtime-side calls were invalid. Admission now translates the remaining
+duration on the scheduler into a `CLOCK_MONOTONIC` deadline for native use.
+See the [OTP NIF reference](https://www.erlang.org/doc/apps/erts/erl_nif.html#enif_monotonic_time).
+
 No ETF decoder, arbitrary BEAM terms, atom creation from user strings, public
-PID handles, progress effects or streaming API is added here.
+PID handles are added here. Typed NIF ask replies use `enif_inspect_binary`,
+owner/sequence checks and dirty-CPU validation before waking the IO loop.
+Handler failures cannot safely unwind an arbitrary typed continuation and
+therefore freeze that module; no extra `erl_driver` API is involved.
 
 ## erl_driver
 

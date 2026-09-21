@@ -20,7 +20,8 @@ defmodule Bendler.Sig do
   A callback named `ask`, written `~ask: Request -> IO(Response)`, is a
   typed host callback instead of an emitter. Its generated Elixir function
   takes a final unary handler argument. This first version supports one
-  callback channel per export (ask or emit, not both), on Port only.
+  callback channel per export (ask or emit, not both), on Port and experimental
+  NIF. An abandoned NIF ask freezes its module; use Port for restartable failures.
 
   A def whose result is `IO(T)`, `T` marshalled, is exported too: the shim
   binds the result in its `do` block and replies with it. Such a def may

@@ -16,6 +16,11 @@ struct BlCall {
   ErlNifPid pid;
   ErlNifMonitor monitor;
   bool monitored, cancelled, notified;
+  bool events, event_pending, ack_ready, ack_go, ask_active;
+  ErlNifUInt64 event_seq;
+  char* ask_spec;
+  u8* ask_reply;
+  u64 ask_len;
   int state;
   int64_t deadline;
   BlCall* next;
@@ -32,7 +37,20 @@ static ErlNifResourceType *bl_call_type, *bl_pin_type;
 static void* bl_pin;
 static char bl_err[256];
 
-static int64_t bl_now(void) { return enif_monotonic_time(ERL_NIF_MSEC); }
+// Called under bl_lock. A full pipe already contains a pending wake-up.
+static void bl_wake_locked(void) {
+  u8 byte = 1;
+  ssize_t n;
+  do { n = write(bl_pipe[1], &byte, 1); } while (n < 0 && errno == EINTR);
+}
+
+// enif_monotonic_time is scheduler-thread-only (OTP returns TIME_ERROR on
+// our Bend pthread). Store deadlines in the OS clock domain after admission.
+static int64_t bl_now(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts)) return INT64_MAX;
+  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 static bool bl_expired(BlCall* c) { return c->deadline != INT64_MAX && bl_now() >= c->deadline; }
 static ERL_NIF_TERM bl_error(ErlNifEnv* env, const char* reason) {
   return enif_make_tuple2(env, enif_make_atom(env, "error"), enif_make_atom(env, reason));
@@ -64,6 +82,8 @@ static void bl_unlink_locked(BlCall* c) {
 static void bl_clear(BlCall* c) {
   if (c->monitored) { (void)enif_demonitor_process(NULL, c, &c->monitor); c->monitored = false; }
   free(c->req); c->req = NULL;
+  free(c->ask_spec); c->ask_spec = NULL;
+  free(c->ask_reply); c->ask_reply = NULL;
   if (c->env) { enif_free_env(c->env); c->env = NULL; }
 }
 // Called only once per queued/runtime-owned request, after detaching it.
@@ -72,6 +92,7 @@ static void bl_cancel(BlCall* c) {
   bool release = false;
   pthread_mutex_lock(&bl_lock);
   c->cancelled = true;
+  if (c->state == BL_RUNNING) bl_wake_locked();
   if (c->state == BL_QUEUED) {
     bl_unlink_locked(c); c->state = BL_FINISHED; bl_waiting--; release = true;
   }
@@ -92,6 +113,8 @@ static void bl_call_dtor(ErlNifEnv* env, void* obj) {
   // OTP already dismantled this resource's monitors before calling dtor.
   // Calling enif_demonitor_process here would touch a dying monitor tree.
   free(c->req); c->req = NULL;
+  free(c->ask_spec); c->ask_spec = NULL;
+  free(c->ask_reply); c->ask_reply = NULL;
   if (c->env) { enif_free_env(c->env); c->env = NULL; }
   c->monitored = false;
 }
@@ -108,6 +131,7 @@ static void bl_die(const char* reason) {
   // Other Bend workers may still read the current request. Freeze it in place,
   // including its native resource hold, rather than freeing live memory.
   if (bl_cur) bl_error_locked(bl_cur, "dead");
+  bl_wake_locked();
   if (bl_cv_ready) pthread_cond_broadcast(&bl_cv);
   pthread_mutex_unlock(&bl_lock);
   while (pending) { BlCall* next = pending->next; bl_release(pending); pending = next; }
@@ -152,7 +176,111 @@ static Term bl_frame_next(Env e, IoWork* w) {
   pthread_mutex_unlock(&bl_lock);
   return bl_frame_more(e, w);
 }
+// Event encoding has already enforced the frame budget. Allocate/copy away
+// from bl_lock; the running request's native hold protects c throughout.
+static void bl_event_frame(BlBuf* b) {
+  pthread_mutex_lock(&bl_lock);
+  BlCall* c = bl_cur;
+  bool overlapping = c && c->events && c->event_pending;
+  bool send_event = c && c->events && !c->cancelled && !c->notified && !bl_expired(c);
+  pthread_mutex_unlock(&bl_lock);
+  if (overlapping) bl_fail("concurrent emit effects are unsupported");
+  if (!send_event) return;
+
+  ErlNifEnv* env = enif_alloc_env();
+  ERL_NIF_TERM binary = 0;
+  u64 len = b->len - 5;
+  u8* out = env ? enif_make_new_binary(env, len, &binary) : NULL;
+  bool ok = env && (out || len == 0);
+  if (ok && len) memcpy(out, b->p + 5, len);
+  pthread_mutex_lock(&bl_lock);
+  if (!c->cancelled && !c->notified) {
+    if (bl_dead) bl_error_locked(c, "dead");
+    else if (bl_expired(c)) bl_error_locked(c, "timeout");
+    else if (!ok) bl_error_locked(c, "nomem");
+    else {
+      c->event_seq++;
+      c->event_pending = true; c->ack_ready = false;
+      ERL_NIF_TERM msg = enif_make_tuple4(env, enif_make_atom(env, "bendler_event"),
+        enif_make_copy(env, c->ref), enif_make_uint64(env, c->event_seq), binary);
+      if (!enif_send(NULL, &c->pid, env, msg)) c->cancelled = true;
+    }
+  }
+  pthread_mutex_unlock(&bl_lock);
+  if (env) enif_free_env(env);
+}
+
+static Term bl_ack_more(Env e, IoWork* w) {
+  (void)e;
+  u8 byte;
+  while (read(bl_pipe[0], &byte, 1) == 1) {}
+  pthread_mutex_lock(&bl_lock);
+  BlCall* c = bl_cur;
+  int64_t now = bl_now();
+  bool expired = c && c->deadline != INT64_MAX && now >= c->deadline;
+  if (bl_dead) { pthread_mutex_unlock(&bl_lock); bl_die("runtime is dead"); }
+  if (!c || !c->events || c->cancelled || c->notified || expired) {
+    if (c) {
+      if (expired) bl_error_locked(c, "timeout");
+      c->event_pending = false;
+    }
+    pthread_mutex_unlock(&bl_lock);
+    return term_pak(CID_FALSE, 0);
+  }
+  if (c->ack_ready) {
+    bool go = c->ack_go;
+    c->ack_ready = false; c->event_pending = false;
+    pthread_mutex_unlock(&bl_lock);
+    return term_pak(go ? CID_TRUE : CID_FALSE, 0);
+  }
+  // Translate milliseconds to the runtime's nanosecond tick. Recheck at
+  // most 1s later, avoiding overflow for very distant finite deadlines.
+  u64 at = 0;
+  if (c->deadline != INT64_MAX) {
+    u64 ms = (u64)c->deadline - (u64)now;
+    if (ms > 1000) ms = 1000;
+    at = io_tick() + ms * 1000000ull;
+  }
+  pthread_mutex_unlock(&bl_lock);
+  return io_wait_on(w, bl_pipe[0], POLLIN, at, bl_ack_more);
+}
+static Term bl_ack_next(Env e, IoWork* w) { return bl_ack_more(e, w); }
+
+// Dirty CPU entry: validate the typed response before copying or waking Bend.
+// The sequence and owner checks prevent stale or foreign replies crossing calls.
+ERL_NIF_TERM bendler_nif_answer(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc;
+  BlCall* c; ErlNifBinary bin; ErlNifUInt64 seq; ErlNifPid pid;
+  if (!enif_get_resource(env, argv[0], bl_call_type, (void**)&c) ||
+      !enif_get_uint64(env, argv[1], &seq) || !enif_inspect_binary(env, argv[2], &bin) ||
+      !enif_self(env, &pid) || enif_compare_pids(&pid, &c->pid)) return enif_make_badarg(env);
+  if (bin.size > BENDLER_MAX_FRAME) return bl_invalid(env, "callback response too large");
+  pthread_mutex_lock(&bl_lock);
+  bool valid = c->state == BL_RUNNING && c->event_pending && c->event_seq == seq &&
+    c->ask_spec && !c->ask_reply && !c->cancelled && !c->notified && !bl_expired(c);
+  char* spec = valid ? strdup(c->ask_spec) : NULL;
+  pthread_mutex_unlock(&bl_lock);
+  if (!valid) return bl_error(env, "refused");
+  if (!spec) return bl_error(env, "nomem");
+  const char* at = spec;
+  BlCheck check = {bin.data, bin.data + bin.size, 0, 0, NULL};
+  bl_check(&check, &at, 0, bl_spec_has_dyn(spec, bl_skip_type(spec)));
+  free(spec);
+  if (check.err || check.p != check.end) return bl_invalid(env, "invalid callback response");
+  u8* copy = malloc(bin.size + 1);
+  if (!copy) return bl_error(env, "nomem");
+  memcpy(copy, bin.data, bin.size);
+  pthread_mutex_lock(&bl_lock);
+  valid = c->state == BL_RUNNING && c->event_pending && c->event_seq == seq &&
+    !c->ask_reply && !c->cancelled && !c->notified && !bl_expired(c);
+  if (valid) { c->ask_reply = copy; c->ask_len = bin.size; bl_wake_locked(); }
+  pthread_mutex_unlock(&bl_lock);
+  if (!valid) free(copy);
+  return valid ? enif_make_atom(env, "ok") : bl_error(env, "refused");
+}
+
 static void bl_frame_reply(BlBuf* b) {
+  if (b->len > 4 && b->p[4] == BL_EVENT) { bl_event_frame(b); return; }
   pthread_mutex_lock(&bl_lock);
   BlCall* c = bl_cur; bl_cur = NULL;
   if (c) c->state = BL_DELIVERING;
@@ -319,12 +447,18 @@ static ERL_NIF_TERM bl_stage(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]
   return enif_make_tuple2(env, enif_make_atom(env, "ok"), argv[0]);
 }
 
-ERL_NIF_TERM bendler_nif_submit(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
-  (void)argc;
+static ERL_NIF_TERM bl_submit(ErlNifEnv* env, const ERL_NIF_TERM argv[], bool events) {
   ErlNifBinary bin; ErlNifSInt64 deadline = INT64_MAX;
   if (!enif_inspect_binary(env, argv[0], &bin) || !enif_is_ref(env, argv[2])) return enif_make_badarg(env);
   if (!enif_is_identical(argv[1], enif_make_atom(env, "infinity")) &&
       !enif_get_int64(env, argv[1], &deadline)) return enif_make_badarg(env);
+  if (deadline != INT64_MAX) {
+    int64_t beam_now = enif_monotonic_time(ERL_NIF_MSEC);
+    if (deadline <= beam_now) return bl_error(env, "timeout");
+    u64 remaining = (u64)deadline - (u64)beam_now;
+    int64_t now = bl_now();
+    deadline = remaining >= (u64)(INT64_MAX - now) ? INT64_MAX : now + (int64_t)remaining;
+  }
   if (bin.size > BENDLER_MAX_FRAME) return bl_invalid(env, "request past BENDLER_MAX_FRAME");
   pthread_mutex_lock(&bl_lock);
   const char* error = bl_dead || !bl_ready ? "dead" :
@@ -340,6 +474,7 @@ ERL_NIF_TERM bendler_nif_submit(ErlNifEnv* env, int argc, const ERL_NIF_TERM arg
     return bl_error(env, "nomem");
   }
   memset(c, 0, sizeof *c); c->state = BL_RESERVED; c->deadline = deadline;
+  c->events = events;
   c->env = enif_alloc_env();
   if (!c->env || !enif_self(env, &c->pid)) {
     enif_release_resource(c); return bl_error(env, "nomem");
@@ -354,6 +489,30 @@ ERL_NIF_TERM bendler_nif_submit(ErlNifEnv* env, int argc, const ERL_NIF_TERM arg
   // its destructor retires admission; there is no orphaned native reference.
   enif_release_resource(c);
   return enif_schedule_nif(env, "bendler_validate", ERL_NIF_DIRTY_JOB_CPU_BOUND, bl_stage, 2, args);
+}
+ERL_NIF_TERM bendler_nif_submit(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc; return bl_submit(env, argv, false);
+}
+ERL_NIF_TERM bendler_nif_subscribe(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc; return bl_submit(env, argv, true);
+}
+ERL_NIF_TERM bendler_nif_ack(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+  (void)argc; BlCall* c; ErlNifUInt64 seq;
+  ErlNifPid pid;
+  bool go = enif_is_identical(argv[2], enif_make_atom(env, "true"));
+  if (!enif_get_resource(env, argv[0], bl_call_type, (void**)&c) ||
+      !enif_get_uint64(env, argv[1], &seq) ||
+      (!go && !enif_is_identical(argv[2], enif_make_atom(env, "false"))) ||
+      !enif_self(env, &pid) || enif_compare_pids(&pid, &c->pid) != 0) return enif_make_badarg(env);
+  pthread_mutex_lock(&bl_lock);
+  if (!c->cancelled && c->state == BL_RUNNING && c->event_pending &&
+      !c->ask_spec && !c->ack_ready && seq == c->event_seq) {
+    c->ack_go = go; c->ack_ready = true;
+    if (!go) c->events = false;
+    bl_wake_locked();
+  }
+  pthread_mutex_unlock(&bl_lock);
+  return enif_make_atom(env, "ok");
 }
 ERL_NIF_TERM bendler_nif_cancel(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
   (void)argc; BlCall* c;

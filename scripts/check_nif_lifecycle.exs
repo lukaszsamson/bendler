@@ -29,6 +29,8 @@ defmodule Bendler.NifLifecycleCheck do
     for marker <- [
           "initial call passed",
           "upgrade refused",
+          "event streams survive refused upgrade",
+          "typed asks survive refused upgrade",
           "reply after purge",
           "halting normally"
         ] do
@@ -61,6 +63,9 @@ defmodule Bendler.NifLifecycleCheck do
     55 = apply(@module, :fib, [10, 0, 1])
     IO.puts("NIF lifecycle: upgrade refused")
 
+    check_event_upgrade()
+    check_ask_upgrade()
+
     {sigs, _, _} = Bendler.Sig.parse(File.read!("bend/fib.bend"))
     index = Enum.find_index(sigs, &(&1.name == "slow"))
     sig = Enum.at(sigs, index)
@@ -90,6 +95,27 @@ defmodule Bendler.NifLifecycleCheck do
     :init.stop()
     # Do not return to the CLI after OTP has begun stopping Elixir's tables.
     Process.sleep(:infinity)
+  end
+
+  defp check_event_upgrade do
+    module = Bendler.Test.EventsNif
+    Code.ensure_loaded!(module)
+    before_reload = apply(module, :count_stream, [2])
+    {^module, beam, path} = :code.get_object_code(module)
+    {:error, :on_load_failure} = :code.load_binary(module, path, beam)
+    [event: 0, event: 1, done: 2] = Enum.to_list(before_reload)
+    [event: 0, done: 1] = module |> apply(:count_stream, [1]) |> Enum.to_list()
+    IO.puts("NIF lifecycle: event streams survive refused upgrade")
+  end
+
+  defp check_ask_upgrade do
+    module = Bendler.Test.AskNif
+    Code.ensure_loaded!(module)
+    {:some, 2} = apply(module, :once, [1, fn x -> {:some, x + 1} end])
+    {^module, beam, path} = :code.get_object_code(module)
+    {:error, :on_load_failure} = :code.load_binary(module, path, beam)
+    {:some, 3} = apply(module, :once, [2, fn x -> {:some, x + 1} end])
+    IO.puts("NIF lifecycle: typed asks survive refused upgrade")
   end
 end
 

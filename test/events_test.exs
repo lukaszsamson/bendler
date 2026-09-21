@@ -160,16 +160,4 @@ defmodule Bendler.EventsTest do
 
     assert_raise Bendler.Error, ~r/exited/, fn -> step(cont) end
   end
-
-  test "an effectful export is refused at build time under the NIF backend" do
-    assert_raise Bendler.Error, ~r/needs the :port backend/, fn ->
-      defmodule EventsNifRefused do
-        use Bendler,
-          otp_app: :bendler,
-          source: "bend/events.bend",
-          backend: :nif,
-          exports: ["count"]
-      end
-    end
-  end
 end

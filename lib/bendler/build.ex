@@ -435,19 +435,7 @@ defmodule Bendler.Build do
     end)
   end
 
-  @nif_no_io "an IO(T) export needs the :port backend: the NIF transport has no " <>
-               "event and acknowledgement channel, so Bendler.emit cannot run in it"
-
-  # The NIF transport carries requests and replies only. An effectful
-  # export (and therefore every emitter) is refused here, at build time,
-  # rather than failing later: it is skipped when the module exports
-  # everything, and named in the error when the user asked for it.
-  defp backend_gate(sigs, skipped, :port), do: {sigs, skipped}
-
-  defp backend_gate(sigs, skipped, :nif) do
-    {io, pure} = Enum.split_with(sigs, & &1.effectful)
-    {pure, skipped ++ Enum.map(io, &{&1.name, @nif_no_io})}
-  end
+  defp backend_gate(sigs, skipped, _backend), do: {sigs, skipped}
 
   defp filter(sigs, nil, _, _), do: sigs
 

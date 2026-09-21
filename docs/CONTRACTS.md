@@ -30,9 +30,9 @@ template (`~`) parameters, closures that are not emitters, arrays,
 unsupported types, and a `Map` nested inside another type (for example
 `List<Map<U32>>`). A Map value is converted as a whole by the Bend prelude
 and may not contain a user datatype. Def names that collide after `.`
-becomes `_` are rejected. An `IO(T)` export is not available under
-`backend: :nif`: that transport has no event channel, so such a def is
-skipped there, and named in a build error when `exports:` asks for it.
+becomes `_` are rejected. Sequential `IO(T)` exports and emitters work on
+both backends, including typed ask callbacks. NIF asks have a stricter failure
+contract: abandoning an active callback freezes its module (see below).
 
 ## User datatypes
 
@@ -168,7 +168,42 @@ raw submit/cancel functions are not a supported public async API; callers of
 that plumbing must explicitly cancel on deadline. There is no native timer
 thread interrupting a running computation.
 
-## Ask callbacks (Port only)
+## NIF events (experimental)
+
+The generated `_stream` API yields the same events and terminal result as Port.
+One event is outstanding per native request. Native code sends from an
+independent environment using `enif_send(NULL, ...)`, then parks the Bend IO
+activation on the existing nonblocking wake pipe. Neither a normal nor dirty
+BEAM scheduler waits for an acknowledgement. Payload allocation/copying occurs
+outside the cancellation lock; the native request hold protects its storage.
+
+Acknowledgements carry the request resource and event sequence; stale or
+duplicate sequences are ignored, and a different process cannot acknowledge
+the request. Stream continuations are owned by their enumerating process;
+do not transfer a suspended continuation to another process. The per-module
+admission limit still includes the parked request and any queued requests.
+
+Early halt or consumer failure cancels future delivery and flushes already-sent
+messages under the existing send/cancel synchronization contract. It wakes a
+parked emit to return false. Unlike Port stream cleanup, this does **not** wait
+for native completion: admission is retained until the def returns. There is
+no hard cancellation between effects. Ignoring false can occupy the runtime;
+choose Port when process isolation and hard termination are required.
+
+Deadlines start at enumeration/admission, not stream construction. At native
+admission, the scheduler converts the BEAM deadline's remaining duration into
+`CLOCK_MONOTONIC` time. `enif_monotonic_time` is scheduler-thread-only and must
+not be called from Bend's pthread. A parked emit sets an IO timer so a paused
+consumer's finite deadline fires without another acknowledgement. Pure running
+work still cannot be interrupted. The Elixir receive also enforces its deadline.
+
+The supported effect topology is a sequential IO spine. Concurrent emits via
+`IO.fork` are unsupported; overlapping events freeze the module rather than
+creating an unbounded mailbox. Runtime fatal errors notify live callers and
+freeze that module as before. VM-lifetime pinning, no reload/unload, and all
+other NIF hazards are unchanged.
+
+## Ask callback contract
 
 An ask export has a parameter named `ask` of type `Request -> IO(Response)`;
 use a Bend template (`~ask`) for repeated calls. Its generated Elixir function
@@ -181,10 +216,16 @@ worker is parked while awaiting it. Both endpoints validate response types;
 the C check includes depth, item, byte and decoded-allocation budgets before
 decoding. The original request cursor is retained and restored around replies.
 
+That framing describes Port. NIF uses resource-scoped event messages and a
+dirty-CPU reply entry point, not stdin/stdout. Only the submitting process may
+answer, and the pending sequence must match. The frame cap is checked before
+copying; type and allocation budgets are validated before Bend decodes it.
+Malformed/stale native replies are refused without consuming the pending ask.
+
 The handler runs in a fresh linked/monitored process, not the Port owner or
 caller. It has a fixed 5-second deadline; the request's total deadline remains
 active. Handler exceptions, wrong response types and handler timeout fail with
-`:callback`, close the owner/worker and let a supervisor restart it. No automatic
+`:callback`; on Port they close the owner/worker and let a supervisor restart it. No automatic
 retries. Total request timeout is `:timeout`; owner death is `:exited`. Caller
 death also closes its occupied worker. A typed `Result.Fail` is normal data and
 does not trigger replacement. Queued requests fail on owner replacement as usual.
@@ -194,6 +235,18 @@ through another process is not detected. Callbacks are trusted host code, not
 a sandbox: spawned descendants and external side effects are their responsibility.
 Handlers must not use raw file handles owned by another process. One request
 remains in flight for the entire callback-driven computation.
+
+**Experimental NIF failure policy:** handler failure, invalid handler return,
+handler timeout, caller death or total deadline while an ask is waiting
+abandons its continuation and permanently freezes that module. Queued and
+future calls fail `:dead`; VM restart is required. Other modules remain usable.
+There is no safe native request unwind: the implementation neither invents a
+value of Response nor uses `longjmp` through the runtime. A successfully
+encoded `Result.Fail` is ordinary data and does **not** freeze the module.
+Cancellation during pure work still cannot interrupt it; the next ask will
+observe cancellation and freeze, while a normal terminal reply retires it.
+Use Port when automatic recovery matters. NIF handlers have a guardian that
+monitors their caller and kills/reaps the handler on completion or abandonment.
 
 Event cancellation remains cooperative: false only requests that the def stop.
 Use a finite total deadline if cleanup must be bounded even for a def that

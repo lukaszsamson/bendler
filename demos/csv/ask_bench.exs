@@ -1,7 +1,7 @@
 # ROWS=10000,100000 SAMPLES=5 MIX_ENV=test mix run demos/csv/ask_bench.exs
 defmodule CsvAskBench do
   @moduledoc false
-  alias Bendler.Demos.{CsvAskPort, CsvStream, CsvStreamPort}
+  alias Bendler.Demos.{CsvAskNif, CsvAskPort, CsvStream, CsvStreamPort}
 
   def run do
     counts =
@@ -57,13 +57,20 @@ defmodule CsvAskBench do
           value
         end
 
+        nif = fn -> nif_aggregate(path, chunk) end
+
         expected = nimble.()
 
         IO.puts(
           "rows=#{count} bytes=#{File.stat!(path).size} asks=#{div(File.stat!(path).size + chunk - 1, chunk) + 1}"
         )
 
-        for {name, fun} <- [nimble_csv: nimble, host_driven_port: host, ask_port: native] do
+        for {name, fun} <- [
+              nimble_csv: nimble,
+              host_driven_port: host,
+              ask_port: native,
+              ask_nif: nif
+            ] do
           measure(name, fun, expected, samples)
         end
 
@@ -72,6 +79,25 @@ defmodule CsvAskBench do
     after
       Supervisor.stop(sup)
       File.rm(path)
+    end
+  end
+
+  defp nif_aggregate(path, chunk) do
+    File.open!(path, [:read, :binary], fn file ->
+      {:ok, value} =
+        CsvAskNif.aggregate(chunk, 65_536, 1_000_000, fn {offset, count} ->
+          read_chunk(file, offset, count)
+        end)
+
+      value
+    end)
+  end
+
+  defp read_chunk(file, offset, count) do
+    case :file.pread(file, offset, count) do
+      {:ok, bytes} -> {:ok, {:some, bytes}}
+      :eof -> {:ok, :none}
+      {:error, reason} -> {:error, inspect(reason)}
     end
   end
 

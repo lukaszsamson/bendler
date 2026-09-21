@@ -57,11 +57,13 @@ defmodule Bendler do
   rejected the frame). Arguments are checked before encoding and raise
   `ArgumentError`.
 
-  A Port export with `~ask: Request -> IO(Response)` takes a final unary
+  An export with `~ask: Request -> IO(Response)` takes a final unary
   Elixir handler. Handler failure raises `:callback`; direct same-worker
   callback reentry raises `:reentrant`. One callback channel per export:
   ask or emit, not both. Handlers run in fresh processes with five-second
   deadlines; the total request deadline remains active.
+  A failed/abandoned NIF ask freezes that module until VM restart; typed
+  `Result.Fail` responses do not. Port failures are supervisor-restartable.
 
   The build runs when the module compiles if the project does not list the
   `:bendler` Mix compiler; with `compilers: Mix.compilers() ++ [:bendler]`
@@ -104,7 +106,9 @@ defmodule Bendler do
     funs =
       sigs
       |> Enum.with_index()
-      |> Enum.flat_map(fn {sig, i} -> Bendler.define(sig, i, codec_types, cfg.backend) end)
+      |> Enum.flat_map(fn {sig, i} ->
+        Bendler.define(sig, i, codec_types, cfg.backend, cfg.timeout)
+      end)
 
     typedefs = Enum.map(types, &Bendler.Sig.data_typespec/1)
 
@@ -186,6 +190,8 @@ defmodule Bendler do
       @doc false
       def __bendler_submit(_frame, _deadline, _ref), do: :erlang.nif_error(:bendler_not_loaded)
 
+      unquote(nif_effect_stubs())
+
       @doc false
       def __bendler_cancel(_handle), do: :erlang.nif_error(:bendler_not_loaded)
 
@@ -229,6 +235,19 @@ defmodule Bendler do
     end
   end
 
+  defp nif_effect_stubs do
+    quote do
+      @doc false
+      def __bendler_subscribe(_frame, _deadline, _ref), do: :erlang.nif_error(:bendler_not_loaded)
+
+      @doc false
+      def __bendler_ack(_handle, _sequence, _go), do: :erlang.nif_error(:bendler_not_loaded)
+
+      @doc false
+      def __bendler_answer(_handle, _sequence, _body), do: :erlang.nif_error(:bendler_not_loaded)
+    end
+  end
+
   @doc false
   def unwrap({:bendler_raised, %ErlangError{original: {:bendler_dead, why}}, _}) do
     raise Bendler.Error, message: "the Bend runtime is dead: #{why}", reason: :dead
@@ -263,9 +282,17 @@ defmodule Bendler do
   end
 
   @doc false
-  def invoke_ask(module, fun, {index, pairs, codec, return_type}, handler, input, output)
+  def invoke_ask(
+        module,
+        fun,
+        {backend, timeout},
+        {index, pairs, codec, return_type},
+        handler,
+        input,
+        output
+      )
       when is_function(handler, 1) do
-    Bendler.Telemetry.span(module, fun, :port, fn ->
+    Bendler.Telemetry.span(module, fun, backend, fn ->
       frame = Bendler.Codec.request(index, pairs, codec)
 
       callback = fn body ->
@@ -275,10 +302,18 @@ defmodule Bendler do
         encoded
       end
 
-      reply = Bendler.Port.ask_call(module, frame, callback)
+      reply =
+        case backend do
+          :port -> Bendler.Port.ask_call(module, frame, callback)
+          :nif -> Bendler.Nif.ask(module, frame, Bendler.Nif.deadline(timeout), callback)
+        end
+
       Bendler.Codec.check(result(reply, fun), return_type, fun, codec)
     end)
   end
+
+  @doc false
+  def stream(module, fun, config, _deadline), do: stream(module, fun, config)
 
   @doc false
   @spec stream(module(), atom(), tuple()) :: Enumerable.t()
@@ -406,7 +441,8 @@ defmodule Bendler do
         %Bendler.Sig{name: name, params: params, ret: {ret_t, ret_text}} = sig,
         index,
         codec,
-        backend
+        backend,
+        timeout \\ :infinity
       ) do
     fname = name |> String.replace(".", "_") |> String.to_atom()
     vars = Enum.map(params, &Macro.var(String.to_atom(&1.name), __MODULE__))
@@ -437,6 +473,7 @@ defmodule Bendler do
           Bendler.invoke_ask(
             __MODULE__,
             unquote(fname),
+            {unquote(backend), unquote(timeout)},
             {unquote(index), unquote(args), unquote(Macro.escape(codec)),
              unquote(Macro.escape(ret_t))},
             unquote(handler),
@@ -475,7 +512,9 @@ defmodule Bendler do
       ret_spec: ret_spec,
       types: types,
       sig_text: sig_text,
-      ret_t: ret_t
+      ret_t: ret_t,
+      backend: backend,
+      timeout: timeout
     }
 
     [call | stream_fun(sig, ctx)]
@@ -511,17 +550,19 @@ defmodule Bendler do
         drives the acknowledgements: the one for an event goes out when
         the next is asked for, so a paused consumer holds one event and
         the worker waits inside its emit. Halting early (`Enum.take/2`,
-        a raise) makes the next emit answer `False`, and the stream
-        releases the request once the def has returned.
+        a raise) makes the next emit answer `False`. Port cleanup waits
+        for the def to return; NIF cleanup cancels delivery and returns
+        immediately, retaining native admission until the def completes.
         """
         @spec unquote(sname)(unquote_splicing(types)) ::
                 Enumerable.t({:event, unquote(event_spec)} | {:done, unquote(ret_spec)})
         def unquote(sname)(unquote_splicing(vars)) do
-          Bendler.stream(
+          unquote(if ctx.backend == :nif, do: Bendler.Nif, else: Bendler).stream(
             __MODULE__,
             unquote(sname),
             {unquote(index), unquote(args), unquote(Macro.escape(codec)),
-             unquote(Macro.escape(ret_t)), unquote(Macro.escape(e.type))}
+             unquote(Macro.escape(ret_t)), unquote(Macro.escape(e.type))},
+            unquote(ctx.timeout)
           )
         end
       end

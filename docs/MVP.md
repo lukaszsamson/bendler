@@ -128,8 +128,8 @@ GPU-shaped kernels (the lane itself builds and runs through a port; the
 ray tracer demo shows why a scene-as-list kernel does not gain from it),
 the direct-call compiler patch (the real NIF speed-up; upstream
 WONTFIX #813 is the hook), an inline `~B` sigil, combined ask/emit exports,
-multiple callback handlers, configurable callback deadlines, events and
-callbacks under the NIF transport, and
+multiple callback handlers, configurable callback deadlines, recoverable
+aborted NIF ask continuations, and
 more than one request in flight (`IO.fork` alone is not enough while the
 codec's cursor is global).
 
@@ -154,8 +154,8 @@ side against the emitter's declared type exactly as replies are.
 
 What the emit channel deliberately is not: arbitrary typed callback replies
 (those now use the separate ask channel below), several requests in flight,
-and events under the NIF transport, which has no such channel and refuses
-an effectful export at build time. `demos/raytrace/`'s `fly` is the
+and concurrent effect activations. NIF now supports both emit and typed ask,
+with the failure policy below. `demos/raytrace/`'s `fly` is the
 worked example: one call, a whole camera turn, a frame per event.
 
 ## 5c. Done: typed Port ask callbacks and native-owned CSV aggregation
@@ -173,9 +173,37 @@ worked example: one call, a whole camera turn, a frame per event.
       a three-way benchmark are in `demos/csv/ASK.md`.
 
 This first version uses the reserved callback name `ask` and permits one
-callback channel per export: ask or emit, not both. NIF support and concurrent
+callback channel per export: ask or emit, not both. Concurrent
 requests remain deferred. The next callback demo could be batched graph search
 over host-owned data; CSV validates the mechanics with an existing oracle.
+
+## 5d. Done: experimental NIF events and particle ticks
+
+- [x] Sequential IO exports and emit share the generated Port/NIF stream API.
+- [x] One outstanding event, sequence-checked acknowledgement, parked IO wait,
+      resource ownership and send/cancel synchronization; admission stays bounded.
+- [x] Caller death, early halt, exceptions, stale acknowledgements, paused
+      deadlines, overload and fatal-runtime isolation tests.
+- [x] Fix native deadlines: translate on a scheduler to OS monotonic time;
+      `enif_monotonic_time` is invalid on the Bend runtime pthread.
+- [x] Balanced-fork oscillator demo with Port/NIF parity, streamed SVG output
+      and separate scalar-event / particle-payload benchmarks.
+
+No windowed acknowledgement protocol, multiple in-flight requests or
+hard cancellation is claimed. See `demos/particles/README.md` and CONTRACTS.md.
+
+## 5e. Done: experimental typed NIF ask
+
+- [x] Same generated callback API and types as Port, including CSV chunk pulls.
+- [x] Owner/sequence checks and bounded dirty-CPU validation before native decoding.
+- [x] Handler guardian, caller monitoring, five-second handler deadline, total
+      deadline and direct same-module reentry rejection.
+- [x] Explicit fail-closed policy: an abandoned pending ask freezes its NIF
+      module. Typed Result application errors preserve usability.
+- [ ] Recoverable native request unwind (requires runtime/compiler support).
+
+This does not make NIF the recommended backend; Port provides restartable failure
+isolation. Concurrent effects, combined ask/emit and safe unload remain deferred.
 
 ## 6. A real port, to learn what is missing
 Pick code that is pure, terminating and numeric or string shaped, with a

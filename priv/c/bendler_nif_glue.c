@@ -6,10 +6,16 @@ int bendler_nif_upgrade(ErlNifEnv*, void**, void**, ERL_NIF_TERM);
 ERL_NIF_TERM bendler_nif_init(ErlNifEnv*, int, const ERL_NIF_TERM[]);
 ERL_NIF_TERM bendler_nif_submit(ErlNifEnv*, int, const ERL_NIF_TERM[]);
 ERL_NIF_TERM bendler_nif_cancel(ErlNifEnv*, int, const ERL_NIF_TERM[]);
+ERL_NIF_TERM bendler_nif_subscribe(ErlNifEnv*, int, const ERL_NIF_TERM[]);
+ERL_NIF_TERM bendler_nif_ack(ErlNifEnv*, int, const ERL_NIF_TERM[]);
+ERL_NIF_TERM bendler_nif_answer(ErlNifEnv*, int, const ERL_NIF_TERM[]);
 static ErlNifFunc funcs[] = {
   {"__bendler_init__", 0, bendler_nif_init, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"__bendler_submit", 3, bendler_nif_submit, 0},
-  {"__bendler_cancel", 1, bendler_nif_cancel, 0}
+  {"__bendler_cancel", 1, bendler_nif_cancel, 0},
+  {"__bendler_subscribe", 3, bendler_nif_subscribe, 0},
+  {"__bendler_ack", 3, bendler_nif_ack, 0},
+  {"__bendler_answer", 3, bendler_nif_answer, ERL_NIF_DIRTY_JOB_CPU_BOUND}
 };
 // Upgrade is explicitly refused. The permanent callback-bearing resource,
 // not an unload callback, postpones dlclose while runtime threads exist.

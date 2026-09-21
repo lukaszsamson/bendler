@@ -224,11 +224,13 @@ At most one event is outstanding, so the worker cannot run ahead of its
 consumer. A `False` is the only cancellation there is: it is typed, it is
 cooperative, and a def that ignores it simply keeps being told `False`.
 
-Events are a port feature. The NIF transport carries requests and replies
-only, so an `IO(T)` export is skipped under `backend: :nif`, and named in
-a build error when `exports:` asks for it.
+Events work on Port and experimental NIF. The NIF delivers a typed payload
+in `{:bendler_event, ref, sequence, binary}` and accepts acknowledgements
+against the resource and sequence. These envelopes and native entry points
+are internal; use the same generated `_stream` Enumerable on either backend.
+Sequential IO-only exports and typed ask callbacks are supported too.
 
-## Typed ask callbacks (Port only)
+## Typed ask callbacks
 
 A function parameter specifically named `ask` with type
 `~ask: Request -> IO(Response)` is a host callback. The generated Elixir
@@ -240,6 +242,8 @@ a `Result` application error are ordinary typed responses, not transport errors.
 One ASK frame (tag 17 plus an encoded Request) is outstanding at a time.
 The response is a length-prefixed encoded Response, checked in Elixir and
 again by the C validator before decoding. It is not an event acknowledgement.
-An export may have one callback channel: ask or emit, not both. NIF refuses
-these effectful exports. See CONTRACTS.md for handler lifetime, deadlines
+An export may have one callback channel: ask or emit, not both. Experimental
+NIF uses resource/sequence-checked native replies instead of framed stdin.
+An abandoned NIF ask freezes its module; typed application errors do not.
+See CONTRACTS.md for handler lifetime, deadlines
 and failures, and `demos/csv/ASK.md` for a working chunk-reader contract.

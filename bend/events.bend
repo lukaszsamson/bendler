@@ -66,3 +66,9 @@ def pairs.go(~emit: (U32 & String) -> IO(Bool), n: Nat, +i: U32, ok: Bool) -> IO
 
 def pairs(~emit: (U32 & String) -> IO(Bool), n: U32) -> IO(U32):
   pairs.go(~emit, U32.to_nat(n), 0, True{})
+
+# Isolated fatal-runtime fixture: invoke only from its dedicated NIF module.
+def fail_after(~emit: U32 -> IO(Bool), n: Nat) -> IO(Nat):
+  do IO<Nat>:
+    go : Bool <- emit(1)
+    IO.pure(Nat, Nat.add(n, 1n))

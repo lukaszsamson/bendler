@@ -4,6 +4,17 @@
 
 This release is not published yet. The current tree includes:
 
+- Experimental NIF emit streams: one outstanding typed event, sequence-checked
+  acknowledgements, bounded admission, cooperative cancellation, native parked
+  deadlines and the same lazy API as Port. Particle ticks and scalar events are
+  benchmarked separately.
+- Experimental typed NIF ask replies with owner/sequence checks, native response
+  validation, bounded handler lifetime and CSV aggregation parity. Failed or
+  abandoned asks freeze their module; typed application errors remain data.
+- Correct native deadline handling: `enif_monotonic_time` is scheduler-only;
+  admission translates deadlines into OS monotonic time before the Bend thread
+  uses them. Event cancellation wakes parked IO without occupying a scheduler.
+
 - Typed, per-call Port `ask` callbacks (tag 17), bounded off-owner handler
   execution, reply validation, same-worker direct reentry rejection and
   supervised failure recovery. CSV aggregation demonstrates native-owned
@@ -33,8 +44,8 @@ This release is not published yet. The current tree includes:
   effect writes an EVENT frame (`BL_EVENT`, tag 16) and parks on the host's
   one-byte acknowledgement, so at most one event is outstanding and `False` is
   a typed, cooperative cancellation. Each such export gets a generated
-  `_stream` function whose demand drives the acknowledgements. Port only: an
-  `IO(T)` export is refused under `backend: :nif`.
+  `_stream` function whose demand drives the acknowledgements. Port uses frames;
+  experimental NIF uses resource-scoped, sequence-tagged messages.
 - The ray tracer demo grew a camera fly-through (`fly`, `fly_gpu`) whose single
   call emits every frame as it finishes, and an animated-PNG writer that
   appends frames to the file while the render is still running.
