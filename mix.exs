@@ -47,7 +47,7 @@ defmodule Bendler.MixProject do
     [
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url, "Bend" => "https://bend-lang.org"},
-      files: ~w(lib priv/c priv/bend mix.exs README.md LICENSE docs)
+      files: ~w(lib priv/c priv/bend mix.exs README.md CHANGELOG.md LICENSE docs)
     ]
   end
 
@@ -57,6 +57,7 @@ defmodule Bendler.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "docs/RESEARCH.md",
         "docs/REVIEW.md",
         "docs/VALIDATION.md",

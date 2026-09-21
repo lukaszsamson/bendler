@@ -1,5 +1,9 @@
 # Bendler
 
+[![CI](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml/badge.svg)](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml)
+
+Public repository: [github.com/lukaszsamson/bendler](https://github.com/lukaszsamson/bendler)
+
 Call [Bend](https://www.bend-lang.org/) code from Elixir, the way Rustler calls
 Rust and Zigler calls Zig. A Bend file becomes an Elixir module: every
 exportable def is a function, and the Bend program runs either as a NIF
@@ -12,6 +16,16 @@ NIF backend is experimental (see "Limits and hazards"). Read
 why the design is what it is, `docs/REVIEW.md` for what two rounds of
 independent review found and changed, and `docs/VALIDATION.md` for what
 was verified.
+
+### Support matrix
+
+| Component | Status |
+|---|---|
+| Bend | 2.0.20 only |
+| OTP | 28 baseline |
+| macOS | arm64 locally tested |
+| Linux | CI workflow configured; initial run pending |
+| Windows | Not supported |
 
 ## Usage
 

@@ -16,17 +16,20 @@ closed while adopting the reviews.
       library as a dependency builds nothing of the library's.
 - [x] (done) Port is the default; the README example is supervised.
 - [x] (done) Atomic staging; per-app build requests; `clean` keeps requests.
-- [ ] `CHANGELOG.md`; a support matrix stated plainly: Bend 2.0.20 only,
+- [x] `CHANGELOG.md`; a support matrix stated plainly: Bend 2.0.20 only,
       OTP 28 baseline, macOS arm64 tested, Linux via CI, no Windows.
-- [ ] Pinned-toolchain CI on macOS and Linux: `install.sh` for bend, clang,
+- [ ] Pinned-toolchain CI on macOS and Linux (configured; remote validation
+      pending): checksum-verified Bend 2.0.20 and LLVM 21.1.8 installers,
       `mix test`, format, warnings-as-errors, credo, dialyzer, plus the
       consumer-app check, the clean-then-compile workflow and the
       compiler-free release run.
 - [ ] Linux build: drop `-undefined dynamic_lookup`, add `-lX11`/`-lasound`
       only when the emitted C includes them, confirm the runtime's
       fixed-hint `mmap` coexists with the BEAM's allocators, and exercise
-      the NIF's monotonic condvar path with a finite timeout that succeeds
-      and one that expires.
+      checked NIF initialization and finite call deadlines that succeed
+      and expire. The initialization condition variable uses a monotonic
+      clock on Linux; call deadlines use monotonic timestamps and Elixir
+      receive timeouts, not timed condition-variable waits.
 
 ## 2. Required for the port MVP
 
