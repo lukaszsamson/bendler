@@ -69,7 +69,7 @@ static int bl_in_read(void) {
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
   if (errno == EINTR) return 1;
-  fprintf(stderr, "bendler: stdin read failed\n"); exit(74);
+  fprintf(stderr, "bendler worker: stdin read failed: errno=%d (%s)\n", errno, strerror(errno)); exit(74);
 }
 
 // Parks until a whole frame is in, validates it, and makes it the current
@@ -96,7 +96,14 @@ static Term bl_frame_more(Env e, IoWork* w) {
 }
 
 static Term bl_frame_next(Env e, IoWork* w) {
-  if (!bl_in_open) { bl_in_open = true; fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK); }
+  if (!bl_in_open) {
+    int flags = fcntl(0, F_GETFL);
+    if (flags < 0 || fcntl(0, F_SETFL, flags | O_NONBLOCK) < 0) {
+      fprintf(stderr, "bendler worker: stdin fcntl failed: errno=%d (%s)\n", errno, strerror(errno));
+      exit(74);
+    }
+    bl_in_open = true;
+  }
   if (bl_end != NULL) bl_drop_frame();
   return bl_frame_more(e, w);
 }
@@ -140,10 +147,13 @@ static void bl_frame_reply(BlBuf* b) {
     ssize_t r = write(1, p, left);
     if (r < 0) {
       if (errno == EINTR) continue;
-      // the host closed the pipe (a deadline, a shutdown): leave quietly
-      if (errno != EPIPE) fprintf(stderr, "bendler: stdout write failed\n");
+      // Include EPIPE: it can be expected during shutdown, but the diagnostic
+      // distinguishes it from other worker and launcher transport failures.
+      fprintf(stderr, "bendler worker: stdout write failed: errno=%d (%s), remaining=%llu\n",
+        errno, strerror(errno), (unsigned long long)left);
       exit(74);
     }
+    if (r == 0) { fprintf(stderr, "bendler worker: stdout write made no progress\n"); exit(74); }
     p += r; left -= (u64)r;
   }
 }

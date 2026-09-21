@@ -11,7 +11,9 @@ cp -R "$root/test/fixtures/release_consumer" "$tmp/consumer"
 cp -R "$root/deps/telemetry" "$tmp/deps/telemetry"
 cp "$root/mix.lock" "$tmp/consumer/mix.lock"
 
-export BENDLER_ROOT="$root"
+# The package smoke test points this at freshly unpacked Hex contents. Only
+# fixtures and the already-fetched telemetry dependency come from the checkout.
+export BENDLER_ROOT="${BENDLER_PACKAGE_SOURCE:-$root}"
 export MIX_DEPS_PATH="$tmp/deps"
 export MIX_ENV=prod
 cd "$tmp/consumer"

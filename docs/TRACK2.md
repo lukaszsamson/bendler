@@ -1,5 +1,8 @@
 # Track 2 execution plan
 
+Historical execution record. Current release gates and the supported API are
+in MVP.md and API.md; the plan below is retained as implementation background.
+
 The release promise remains a reliable CPU Port binding for bounded pure
 functions. NIF lifecycle support and GPU builds are not implied by this work.
 

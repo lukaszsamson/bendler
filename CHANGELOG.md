@@ -4,6 +4,15 @@
 
 This release is not published yet. The current tree includes:
 
+- Freeze the supported CPU Port API for 0.1.x in `docs/API.md`; separate
+  experimental NIF/GPU work from the concise MVP release checklist.
+- Verify the actual Hex tarball in an isolated consumer, including clean/rebuild
+  and a compiler-free release, and run the check in CI.
+- Preserve worker exit codes across a launcher poll/write EPIPE race instead of
+  masking them as status 74. Add a deterministic regression, endpoint/errno
+  diagnostics and cancellation/large-frame stress. The historical event/Murmur
+  flakes remain unproven; this is not a claim that all status-74 failures are fixed.
+
 - Experimental NIF emit streams: one outstanding typed event, sequence-checked
   acknowledgements, bounded admission, cooperative cancellation, native parked
   deadlines and the same lazy API as Port. Particle ticks and scalar events are

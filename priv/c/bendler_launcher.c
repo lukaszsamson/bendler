@@ -17,6 +17,14 @@
 
 static volatile sig_atomic_t stopping;
 static void stop_signal(int sig) { (void)sig; stopping = 1; }
+static int transport_error(const char* operation) {
+  int code = errno;
+  fprintf(stderr, "bendler launcher: %s: errno=%d (%s)\n", operation, code, strerror(code));
+  return 74;
+}
+static void poll_error(const char* endpoint, short events) {
+  fprintf(stderr, "bendler launcher: %s: poll revents=0x%x\n", endpoint, (unsigned short)events);
+}
 static int64_t milliseconds(void) {
   struct timespec t;
   if (clock_gettime(CLOCK_MONOTONIC, &t)) return 0;
@@ -60,16 +68,17 @@ int main(int argc, char** argv) {
   memset(&action, 0, sizeof action);
   sigemptyset(&action.sa_mask);
   action.sa_handler = stop_signal;
-  if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL)) return 74;
+  if (sigaction(SIGTERM, &action, NULL) || sigaction(SIGINT, &action, NULL)) return transport_error("sigaction stop");
   action.sa_handler = SIG_IGN;
-  if (sigaction(SIGPIPE, &action, NULL)) return 74;
+  if (sigaction(SIGPIPE, &action, NULL)) return transport_error("sigaction SIGPIPE");
   int input[2], output[2];
-  if (pipe(input)) return 74;
-  if (pipe(output)) { close(input[0]); close(input[1]); return 74; }
+  if (pipe(input)) return transport_error("pipe worker stdin");
+  if (pipe(output)) { int result = transport_error("pipe worker stdout"); close(input[0]); close(input[1]); return result; }
   pid_t child = fork();
-  if (child < 0) return 74;
+  if (child < 0) return transport_error("fork");
   if (child == 0) {
-    if (setpgid(0, 0) || dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0) _exit(74);
+    if (setpgid(0, 0) || dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0)
+      _exit(transport_error("worker setpgid/dup2"));
     close(input[0]); close(input[1]); close(output[0]); close(output[1]);
     action.sa_handler = SIG_DFL;
     (void)sigaction(SIGTERM, &action, NULL);
@@ -82,6 +91,7 @@ int main(int argc, char** argv) {
   close(input[0]); close(output[1]);
   // Either side can win the race to setpgid; EACCES means exec already ran.
   if (setpgid(child, child) && errno != EACCES && errno != ESRCH) {
+    transport_error("parent setpgid");
     (void)kill(child, SIGKILL);
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
     return 74;
@@ -89,26 +99,43 @@ int main(int argc, char** argv) {
   bool reaped = false, eof = false;
   int worker_result = 74, result = 74;
   Buffer in = {{0}, 0}, out = {{0}, 0};
-  if (nonblocking(0) || nonblocking(1) || nonblocking(input[1]) || nonblocking(output[0])) stopping = 1;
+  if (nonblocking(0) || nonblocking(1) || nonblocking(input[1]) || nonblocking(output[0])) {
+    transport_error("fcntl nonblocking"); stopping = 1;
+  }
   while (!stopping) {
     struct pollfd fds[] = {
-      {0, in.n < sizeof in.bytes ? POLLIN : 0, 0},
+      {0, input[1] >= 0 && in.n < sizeof in.bytes ? POLLIN : 0, 0},
       {input[1], in.n ? POLLOUT : 0, 0},
       {output[0], !eof && out.n < sizeof out.bytes ? POLLIN : 0, 0},
       {1, out.n ? POLLOUT : 0, 0}
     };
-    if (poll(fds, 4, 25) < 0) { if (errno == EINTR) continue; break; }
-    if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) break;
-    if ((fds[0].revents & POLLIN) && receive(0, &in) <= 0) break;
-    if ((fds[1].revents & POLLOUT) && transmit(input[1], &in)) break;
+    if (poll(fds, 4, 25) < 0) { if (errno == EINTR) continue; transport_error("poll"); break; }
+    if (fds[0].revents & (POLLERR | POLLNVAL)) { poll_error("owner stdin", fds[0].revents); break; }
+    if (fds[0].revents & POLLHUP) break;
+    if (fds[0].revents & POLLIN) {
+      int r = receive(0, &in);
+      if (r < 0) { transport_error("read owner stdin"); break; }
+      if (r == 0) break;
+    }
+    if (fds[1].revents & POLLNVAL) { poll_error("worker stdin", fds[1].revents); break; }
+    bool input_closed = (fds[1].revents & (POLLHUP | POLLERR)) != 0;
+    if (!input_closed && (fds[1].revents & POLLOUT) && transmit(input[1], &in)) {
+      if (errno != EPIPE) { transport_error("write worker stdin"); break; }
+      input_closed = true;
+    }
+    if (input_closed) {
+      // A rejecting/exiting worker may close stdin with request bytes queued.
+      // Drain its output and collect its status instead of replacing it by 74.
+      close(input[1]); input[1] = -1; in.n = 0;
+    }
     if ((fds[2].revents & (POLLIN | POLLHUP)) && out.n < sizeof out.bytes) {
       int r = receive(output[0], &out);
-      if (r < 0) break;
+      if (r < 0) { transport_error("read worker stdout"); break; }
       eof = r == 0;
     }
-    if (fds[2].revents & (POLLERR | POLLNVAL)) break;
-    if (fds[3].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
-    if ((fds[3].revents & POLLOUT) && transmit(1, &out)) break;
+    if (fds[2].revents & (POLLERR | POLLNVAL)) { poll_error("worker stdout", fds[2].revents); break; }
+    if (fds[3].revents & (POLLERR | POLLHUP | POLLNVAL)) { poll_error("owner stdout", fds[3].revents); break; }
+    if ((fds[3].revents & POLLOUT) && transmit(1, &out)) { transport_error("write owner stdout"); break; }
     if (!reaped) {
       // Observe exit without releasing the group leader's PID. Kill any
       // descendants before reaping, so the group id cannot be recycled.
@@ -117,13 +144,15 @@ int main(int argc, char** argv) {
       int r = waitid(P_PID, (id_t)child, &info, WEXITED | WNOHANG | WNOWAIT);
       if (r == 0 && info.si_pid == child) {
         worker_result = info.si_code == CLD_EXITED ? info.si_status : 128 + info.si_status;
+        if (worker_result) fprintf(stderr, "bendler launcher: worker exit status=%d (si_code=%d)\n", worker_result, info.si_code);
         terminate_worker(child, false);
         reaped = true;
-      } else if (r < 0 && errno != EINTR) break;
+      } else if (r < 0 && errno != EINTR) { transport_error("waitid"); break; }
     }
     if (reaped && eof && out.n == 0) { result = worker_result; break; }
   }
   terminate_worker(child, reaped);
-  close(input[1]); close(output[0]);
+  if (input[1] >= 0) close(input[1]);
+  close(output[0]);
   return result;
 }

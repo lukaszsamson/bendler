@@ -14,9 +14,12 @@ Rust and Zigler calls Zig. A Bend file becomes an Elixir module: every
 exportable def is a function, and the Bend program runs either as a NIF
 inside the VM or as a port executable beside it.
 
-**Status: proof of concept.** It works end to end on macOS with Bend 2.0.20,
-Elixir 1.21-dev and OTP 28. The port backend is the one to reach for; the
-NIF backend is experimental (see "Limits and hazards"). Read
+**Status: feature-complete early-adopter release candidate; not yet published.**
+The CPU Port API is frozen for 0.1.x in [API.md](docs/API.md). macOS arm64 and
+Linux x86_64 are tested with Bend 2.0.20, Elixir 1.20.3 and OTP 28.
+The [release checklist](docs/MVP.md) still records an unresolved historical
+Port failure investigation. NIF and GPU are opt-in experiments, not part of
+the stable lifecycle promise (see "Limits and hazards"). Read
 `docs/RESEARCH.md` for how the Bend compiler and runtime were explored and
 why the design is what it is, `docs/REVIEW.md` for what two rounds of
 independent review found and changed, and `docs/VALIDATION.md` for what

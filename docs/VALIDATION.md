@@ -1,5 +1,47 @@
 # Validation record
 
+## 2026-09-21: release confidence and status-74 investigation
+
+Local macOS arm64, Bend 2.0.20, Elixir 1.20.3, OTP 28:
+
+- Before transport changes, the event and Murmur suites passed all ten seeds
+  (123, 999157, 1–8): 260 tests. The historical failures did not reproduce.
+- A separate controlled poll/write race did reproduce against the committed
+  launcher: a worker closes stdin after POLLOUT becomes ready, then exits 65.
+  A test-only write delay exposes EPIPE; the old launcher terminates with 74
+  instead of reporting 65. The fixed launcher stops forwarding input, drains
+  output and collects the worker's status. Its regression and the three existing
+  launcher lifecycle tests pass. No timing hook is in the production launcher.
+- Relay diagnostics now identify the endpoint and errno or poll flags; observed
+  nonzero worker exits identify the worker status separately. Worker read/write
+  diagnostics include errno (including EPIPE), and stdin nonblocking setup is
+  checked. These logs contain no request/response payloads.
+- Full `mix test --warnings-as-errors` with seeds **123 and 999157**:
+  **199 passed each**. The final race regression also verifies that a worker's
+  last output frame is delivered after its input closes.
+- `scripts/check_port_transport.exs`: **200 rounds**, concurrently exercising
+  early stream halt, consumer exceptions/death and Murmur batch frames spanning
+  4 KiB and 64 KiB boundaries. Results match the Elixir reference, the event
+  worker remains usable, and no failures are retried. The probe is now in CI.
+- `test/package_smoke.sh` builds the actual Hex tarball and unpacks it outside
+  the checkout. A fresh consumer uses only that unpacked Bendler source,
+  compiles, cleans/rebuilds, and runs the assembled release with Bend absent
+  from PATH. The harness supplies its fixture and local telemetry dependency;
+  it neither downloads dependencies nor publishes a package. This is now in CI.
+- The supported CPU Port surface is frozen in API.md; MVP.md is a release
+  checklist rather than a history of already-completed feature proposals.
+- Core strict Credo plus explicit stress-script lint, formatting, dev/library
+  Dialyzer (zero errors) and ExDoc warnings-as-errors passed. The CSV ask ASan
+  harness passed repeated callbacks, reallocations, typed errors, reuse and
+  malformed replies with the updated Port transport.
+
+**Still unresolved:** the original event/Murmur status-74 failures cannot be
+attributed to the reproduced exit-status masking race. The latter requires a
+worker input close; it does not explain why a healthy worker would close input.
+Do not describe the historical failures as fixed. Retain this release gate until
+there is a diagnosis or an explicit release-risk decision. Updated CI has not
+yet run on these uncommitted changes; local tests do not establish Linux results.
+
 ## 2026-09-21: typed NIF ask callbacks
 
 On the same local macOS arm64 toolchain as below:

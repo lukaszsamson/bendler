@@ -58,6 +58,7 @@ defmodule Bendler.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
+        "docs/API.md",
         "docs/RESEARCH.md",
         "docs/REVIEW.md",
         "docs/VALIDATION.md",

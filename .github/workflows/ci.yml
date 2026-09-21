@@ -95,8 +95,16 @@ jobs:
           MIX_ENV: test
         run: mix run scripts/check_overload.exs
 
+      - name: Port cancellation and large-frame transport stress
+        env:
+          MIX_ENV: test
+        run: mix run scripts/check_port_transport.exs
+
       - name: Compiler-free consumer release
         run: sh test/release_smoke.sh
+
+      - name: Actual Hex package in a fresh consumer
+        run: sh test/package_smoke.sh
 
       - name: Experimental NIF lifecycle in isolated VMs
         env:

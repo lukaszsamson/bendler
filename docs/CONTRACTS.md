@@ -1,8 +1,8 @@
 # Bendler contracts
 
-This is the compact public contract for the generated port and experimental
-NIF. Both backends use the same signature parser and wire codec; the port is
-the intended MVP boundary, not a claim that every platform has passed CI.
+This describes runtime semantics for the generated Port and experimental NIF.
+[API.md](API.md) defines which entry points are stable; shared syntax does not
+make NIF or GPU production-supported. See VALIDATION.md for tested revisions.
 
 ## Exported signatures
 
@@ -100,6 +100,14 @@ worker is parked on. `BENDLER_MAX_FRAME` bounds an event like any frame, and
 the exit-code contract (0 clean EOF, 65 framing, 74 transport) is unchanged;
 EOF while an acknowledgement is awaited is the host leaving, so the worker
 exits 0.
+
+The launcher preserves a worker's exit status even if that worker closes stdin
+while request bytes are pending; it drains remaining stdout before exiting.
+Transport diagnostics distinguish launcher endpoints from worker read/write
+failures and include errno or poll flags, not payloads. Diagnostic text is not
+a stable API. `scripts/check_port_transport.exs` stresses cancellation alongside
+large Murmur request frames; VALIDATION.md records the still-unexplained
+historical status-74 failures separately from the fixed exit-status masking race.
 
 At most one event is outstanding. An event belongs to the one request in
 flight. With a live subscriber the port owner forwards it and waits for the

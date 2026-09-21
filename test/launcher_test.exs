@@ -7,6 +7,8 @@ defmodule Bendler.LauncherTest do
 
     for {src, name, flags} <- [
           {"priv/c/bendler_launcher.c", "bendler_launcher", []},
+          {"test/fixtures/closing_worker.c", "closing_worker", []},
+          {"test/fixtures/delayed_launcher.c", "delayed_launcher", []},
           {"test/fixtures/stubborn_worker.c", "worker", []},
           {"test/fixtures/stubborn_worker.c", "descendant_worker", ["-DDESCENDANT"]}
         ] do
@@ -96,6 +98,27 @@ defmodule Bendler.LauncherTest do
 
       _ ->
         flunk("worker #{pid} survived or was not reaped")
+    end
+  end
+
+  test "preserves worker exit status when input closes with relay bytes pending", %{exe: exe} do
+    dir = Path.dirname(exe)
+
+    port =
+      Port.open({:spawn_executable, Path.join(dir, "delayed_launcher")}, [
+        :binary,
+        :exit_status,
+        {:packet, 4},
+        args: [Path.join(dir, "closing_worker")]
+      ])
+
+    try do
+      assert_receive {^port, {:data, <<1>>}}, 1000
+      assert Port.command(port, :binary.copy(<<0>>, 1024))
+      assert_receive {^port, {:data, <<2>>}}, 3000
+      assert_receive {^port, {:exit_status, 65}}, 3000
+    after
+      if Port.info(port), do: Port.close(port)
     end
   end
 end
