@@ -8,8 +8,8 @@ float kernel is adapted from Bend's own
 (Apache-2.0); the scene, the colour, the tiling and all the scheduling
 are this demo's.
 
-This is the first demo whose **arguments are user datatypes**. The whole
-scene description crosses the boundary:
+The **arguments are user datatypes**: the whole scene description crosses
+the boundary.
 
 ```
 type Vec is Data:
@@ -156,13 +156,13 @@ pixels out at 640x480 and 6.9 MiB at 1920x1200:
 | 640x480 | 136 ms | 39 ms | 27 ms |
 | 1920x1200 | 1088 ms | 345 ms | 233 ms |
 
-The first version of the demo forked the tiles of a call as a spine
-(`a b = tile(x) go(rest)`) and measured 40 ms for 640x480 on 12
-threads, with batches past four getting slower (batch 16: 125 ms). The
-balanced fork tree that the GPU lane needed (below) also halves the
-CPU time: with it a bigger batch costs nothing, and a whole image in one
-call is as fast as any split, so the default batch is 16 and the choice
-is about progressive delivery and deadlines, not speed.
+**Finding: fork the tiles of a call as a balanced tree, not a spine.**
+Forking them as a spine (`a b = tile(x) go(rest)`) measures 40 ms for
+640x480 on 12 threads, and batches past four get slower (batch 16:
+125 ms). The balanced fork tree the GPU lane needs (below) halves the CPU
+time as well: with it a bigger batch costs nothing and a whole image in
+one call is as fast as any split, so the default batch is 16 and the
+choice is about progressive delivery and deadlines, not speed.
 
 Same renderer, 160x120, 12 threads:
 
@@ -278,13 +278,11 @@ comparison against doubles is fuzzy.
 
 ## What the port taught
 
-- **A multi-line `def` signature is not exportable.** `Bendler.Sig`
-  reads one line, so `render_tiles` and `render_checked` had to have
-  their parameters and return type on a single (long) line before they
-  appeared in the module. It is reported at debug level, which is easy to
-  miss: `MIX_ENV=test mix compile` and read the
-  `does not export ...: a signature bendler cannot read (multi-line?)`
-  lines. Two of the ThumbHash demo's defs are in the same position.
+- **A def bendler cannot read is skipped quietly.** The reason is
+  reported at debug level, which is easy to miss: run
+  `MIX_ENV=test mix compile` and read the
+  `does not export ...` lines. Two of the ThumbHash demo's defs are in
+  that position.
 - **The generated `@type` per datatype collides with your own.** The
   module gets `vec/0`, `sphere/0`, `scene/0` from the Bend `type`
   declarations, so writing those typespecs by hand is a compile error.
@@ -331,14 +329,14 @@ on one CPU core, and the time grows linearly with the tile: the lanes
 are not doing useful parallel work. The shader guide says why: every
 lane's read of a shared `+` value (here the sphere list, walked per ray)
 is an atomic, and per-ray allocation (`Vec` results, list cells) is heap
-contention. A bang whose forks form a long right spine (the first
-version forked the tile list as `a b = tile(x) go(rest)`; 300 tiles were
-enough) ends in a runtime `memory fault (machine stack overflow?)` that
-kills the port, which the owner reports as `{:exit_status, 1}` and a
-supervisor restarts. Reduced to a pure Bend program and reported as
-bendlang/bend#918: a spine of about a thousand forks dies on Metal, the
-CPU pool takes any depth, and a balanced tree of the same leaves is
-fine. Both exports now fork the tile list as a balanced tree. With it,
+contention. A bang whose forks form a long right spine (forking the
+tile list as `a b = tile(x) go(rest)`, with 300 tiles) ends in a runtime
+`memory fault (machine stack overflow?)` that kills the port, which the
+owner reports as `{:exit_status, 1}` and a supervisor restarts. Reduced to
+a pure Bend program and reported as bendlang/bend#918: a spine of about a
+thousand forks dies on Metal, the CPU pool takes any depth, and a balanced
+tree of the same leaves is fine. Both exports therefore fork the tile list
+as a balanced tree. With it,
 the GPU lane's best for 640x480 is 62 ms in one bang of 300 32-pixel
 tiles (100 ms with 80 64-pixel tiles, 3 s with one tile: the device
 wants leaves), against 24 ms on the CPU pool; a 1920x1200 bang runs

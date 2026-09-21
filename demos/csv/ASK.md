@@ -98,10 +98,10 @@ NIF win here; callback transport is only part of the workload. This demonstrates
 value of avoiding row transfer, not a reason to replace NimbleCSV. No peak-RSS
 or isolated callback-latency measurement is claimed.
 
-## Deliberately deferred
+## Not included
 
-An export has one callback channel, ask **or** emit,
-not both. `ask` is currently a reserved callback parameter name. Multiple
-handlers, configurable handler deadlines, recoverable NIF callback abandonment
-and concurrent native requests are not included. The next useful workload is batched graph
+An export has one callback channel, ask **or** emit, not both, and `ask` is
+a reserved callback parameter name. Multiple handlers, configurable handler
+deadlines, recoverable NIF callback abandonment and concurrent native
+requests are out of scope. The next useful workload is batched graph
 expansion over host-owned data, where Bend decides what data to request.

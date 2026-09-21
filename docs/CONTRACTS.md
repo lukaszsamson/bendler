@@ -2,7 +2,8 @@
 
 This describes runtime semantics for the generated Port and experimental NIF.
 [API.md](API.md) defines which entry points are stable; shared syntax does not
-make NIF or GPU production-supported. See VALIDATION.md for tested revisions.
+make NIF or GPU production-supported. VALIDATION.md describes what is
+checked on the supported toolchain.
 
 ## Exported signatures
 
@@ -30,9 +31,9 @@ template (`~`) parameters, closures that are not emitters, arrays,
 unsupported types, and a `Map` nested inside another type (for example
 `List<Map<U32>>`). A Map value is converted as a whole by the Bend prelude
 and may not contain a user datatype. Def names that collide after `.`
-becomes `_` are rejected. Sequential `IO(T)` exports and emitters work on
-both backends, including typed ask callbacks. NIF asks have a stricter failure
-contract: abandoning an active callback freezes its module (see below).
+becomes `_` are rejected. Sequential `IO(T)` exports, emitters and typed ask
+callbacks work on both backends. NIF asks have a stricter failure contract:
+abandoning an active callback freezes its module (see below).
 
 ## User datatypes
 
@@ -106,8 +107,7 @@ while request bytes are pending; it drains remaining stdout before exiting.
 Transport diagnostics distinguish launcher endpoints from worker read/write
 failures and include errno or poll flags, not payloads. Diagnostic text is not
 a stable API. `scripts/check_port_transport.exs` stresses cancellation alongside
-large Murmur request frames; VALIDATION.md records the still-unexplained
-historical status-74 failures separately from the fixed exit-status masking race.
+large Murmur request frames.
 
 At most one event is outstanding. An event belongs to the one request in
 flight. With a live subscriber the port owner forwards it and waits for the
@@ -165,7 +165,7 @@ internals and reserves substantial virtual address space. A VM-lifetime native
 resource pin prevents code purge from unloading its library beneath live
 threads. Purge does not reclaim its runtime; hot upgrade/reload is unsupported.
 Rebuild artifacts with the old VM stopped; no mixed-version ABI negotiation
-is provided. See `NIF_ROADMAP.md` and `BEAM_API.md`.
+is provided. See `NIF.md`.
 
 NIF deadlines are absolute monotonic milliseconds captured before encoding.
 Admission precedes dirty validation/copying; waiting uses an ordinary process
@@ -224,9 +224,9 @@ worker is parked while awaiting it. Both endpoints validate response types;
 the C check includes depth, item, byte and decoded-allocation budgets before
 decoding. The original request cursor is retained and restored around replies.
 
-That framing describes Port. NIF uses resource-scoped event messages and a
-dirty-CPU reply entry point, not stdin/stdout. Only the submitting process may
-answer, and the pending sequence must match. The frame cap is checked before
+The framing above is the Port transport. The NIF uses resource-scoped event
+messages and a dirty-CPU reply entry point instead of stdin and stdout. Only
+the submitting process may answer, and the pending sequence must match. The frame cap is checked before
 copying; type and allocation budgets are validated before Bend decodes it.
 Malformed/stale native replies are refused without consuming the pending ask.
 
@@ -254,17 +254,10 @@ encoded `Result.Fail` is ordinary data and does **not** freeze the module.
 Cancellation during pure work still cannot interrupt it; the next ask will
 observe cancellation and freeze, while a normal terminal reply retires it.
 Use Port when automatic recovery matters. NIF handlers have a guardian that
-monitors their caller and kills/reaps the handler on completion or abandonment.
+monitors their caller and kills and reaps the handler on completion or
+abandonment.
 
 Event cancellation remains cooperative: false only requests that the def stop.
 Use a finite total deadline if cleanup must be bounded even for a def that
-ignores cancellation. Streams now retain their original owner PID/monitor;
+ignores cancellation. A stream retains its original owner PID and monitor, so
 supervisor replacement cannot retarget a pending stream to the new owner.
-
-## Sanitizer execution
-
-`demos/csv/check_asan.exs` builds a separate ASan-instrumented port executable
-from generated C. It preserves instrumentation everywhere. Only the ASan copy
-disables Bend's `PRESERVE` calling-convention attributes, because the compiler's
-ASan ABI on Apple clang otherwise corrupts the generated runtime spill frame.
-The normal generated shim and the NIF remain untouched.

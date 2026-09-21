@@ -1,9 +1,5 @@
 # Small CSV parser
 
-For the single-call, callback-driven variant that keeps rows and aggregation
-inside Bend, see [Ask-driven CSV aggregation](ASK.md). The host-driven streaming
-parser below remains available on both Port and experimental NIF.
-
 An original Bend implementation of a useful subset of
 [NimbleCSV](https://github.com/dashbitco/nimble_csv)'s eager byte-oriented
 parsing semantics. NimbleCSV 1.3.0 is pinned as a test-only dependency and
@@ -19,8 +15,7 @@ parse_csv(data: B.Bytes, separator: Maybe<U32>)
   -> Result<(U32 & Nat & String), (List<List<B.Bytes>> & Nat)>
 ```
 
-The signature above is wrapped for readability; actual exported signatures
-must remain on one line. Private state is a Bend datatype and never crosses
+The signature above is wrapped for readability. Private state is a Bend datatype and never crosses
 the boundary. No arbitrary-user-datatype converter is needed.
 
 ## Run
@@ -107,10 +102,11 @@ allocates field buffers and transfers the entire nested result to the BEAM.
 A future parse-and-compute kernel returning a small aggregate might amortize
 that cost, but this benchmark does not establish it.
 
-## Streaming: Port first, experimental NIF parity
+## Streaming over Port and experimental NIF
 
 `stream.bend` reuses the eager parser's state transitions and makes them
-resumable. `CsvStream.parse_stream/2` accepts an Enumerable of **arbitrary
+resumable. For the single-call, callback-driven variant that keeps rows and
+aggregation inside Bend, see [Ask-driven CSV aggregation](ASK.md). `CsvStream.parse_stream/2` accepts an Enumerable of **arbitrary
 binary chunks** and lazily yields rows. It supports quoted multiline fields,
 doubled quotes, split CRLF, arbitrary bytes and EOF without a terminator.
 
@@ -191,7 +187,7 @@ MIX_ENV=test mix run demos/csv/check_stream_asan.exs
 ROWS=10000,100000 SAMPLES=5 MIX_ENV=test mix run demos/csv/stream_bench.exs
 ```
 
-The shared 26-test suite covers both backends: every two-part split of
+The shared streaming suite covers both backends: every two-part split of
 representative binary/quoted fixtures, one-byte chunks, generated tables,
 concurrent cursors, lazy reads, source and consumer failures, early halt,
 maximum-size records, limits across chunks, EOF diagnostics and reuse after
@@ -222,24 +218,22 @@ records make cursor copying more expensive.
 
 ## Safety checks
 
-Current status after the user-datatype extension: the expanded ASan harness
-passes its Base-composite, Dyn and malformed-frame cases. The earlier
-`root_done` failure was an instrumentation/ABI incompatibility in generated
-Bend C: an ASan-instrumented `preserve_none` machine segment clobbered the
-arm64 register holding `corpus_eval`'s spill-frame address, from which its
-`Corpus` argument was then reloaded as null. The harness compiles a separate
-`shim_asan.c` with Bend's `PRESERVE` attributes disabled, using the platform
-ABI; ASan remains enabled across the codec and runtime.
+`check_asan.exs`, `check_stream_asan.exs` and `check_ask_asan.exs` build
+AddressSanitizer-instrumented copies of the external Port executable and
+drive them from Elixir: Base composite values, `Dyn` values, malformed
+frames, 100 composite and malformed-request cycles, partitioned streaming
+round trips, a 64 KiB record and error recovery. Leak detection is off.
 
-Tests compare fixed cases, all 781 strings of length 0–4 over quote/comma/CR/LF/a,
-and 40 deterministic generated tables against
+The instrumented copy compiles a separate `shim_asan.c` with Bend's
+`PRESERVE` attributes disabled and the platform ABI, because an
+ASan-instrumented `preserve_none` segment clobbers the arm64 register
+holding `corpus_eval`'s spill-frame address. ASan stays enabled across the
+codec and the runtime, and the production shim keeps the attributes.
+
+These probes instrument an external port only, never a NIF loaded into the
+BEAM, and no UndefinedBehaviorSanitizer result is claimed.
+
+Correctness tests compare fixed cases, all 781 strings of length 0 to 4 over
+quote, comma, CR, LF and `a`, and 40 deterministic generated tables against
 NimbleCSV, including invalid UTF-8 and embedded newlines. Composite tests
 exercise both native backends, nested empty values and malformed frames.
-`check_asan.exs` instruments an external port only, never a loaded NIF; it
-checks 100 composite/malformed-request cycles with leak detection disabled.
-
-A historical combined AddressSanitizer/UndefinedBehaviorSanitizer attempt,
-before the calling-convention diagnosis, stopped in generated Bend runtime
-`root_done` with “applying zero offset to null pointer” (`shim.c:1269`). It
-has not been rerun with the compatibility fix, so this work does **not** claim
-a UBSan-clean Bend runtime or sanitizer coverage of an in-process NIF.

@@ -1,9 +1,7 @@
 # Supported API: 0.1.x
 
-This is the stability boundary, not a claim that the release has been published
-or that every known reliability issue is closed. Release gates are in MVP.md.
-Patch releases preserve this documented API; incompatible changes require a
-versioned migration notice. Experimental/internal interfaces carry no such promise.
+This is the stability boundary. Patch releases preserve this documented API;
+incompatible changes require a versioned migration notice. Experimental/internal interfaces carry no such promise.
 
 ## Supported: CPU Port bindings
 
@@ -63,7 +61,7 @@ compiler compatibility gate and therefore out of the tested runtime contract.
 experimental. They may share generated function shapes with Port without sharing
 its lifecycle guarantees. In particular, a failed or abandoned pending NIF ask
 freezes that module until VM restart; a typed Result error does not. There is
-no safe NIF unload/upgrade or hard cancellation. See NIF_ROADMAP.md and CONTRACTS.md.
+no safe NIF unload/upgrade or hard cancellation. See NIF.md and CONTRACTS.md.
 
 ## Internal, even when exported by Elixir
 
@@ -81,7 +79,9 @@ conversion helpers are not.
 - API: stability and supported entry points (this file).
 - TYPES: precise type/value mapping and signature restrictions.
 - CONTRACTS: operational semantics, budgets, errors and telemetry.
-- MVP: short release checklist and non-goals.
-- VALIDATION: dated evidence, failed experiments and unresolved findings.
-- RESEARCH, REVIEW, TRACK2, BEAM_API, NIF_ROADMAP: background and experiments;
-  historical entries do not override this API boundary.
+- DESIGN: why the program serves requests through foreign effects.
+- NIF: the experimental in-VM backend and the BEAM APIs it uses.
+- VALIDATION: what is checked, known issues and what is not validated.
+- ROADMAP: work waiting on Bend upstream, and work deferred by choice.
+
+None of these override the API boundary defined here.

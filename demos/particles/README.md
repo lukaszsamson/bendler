@@ -78,5 +78,5 @@ sufficient here; the results do not justify a windowed protocol yet.
 plain calls, paused consumers, caller death, cancellation races, bounded
 admission, stale acknowledgements, native deadlines and fatal-module isolation.
 This demo checks Port/NIF F32 equality, one-step integration against an analytic
-case, and incremental SVG output. See `docs/VALIDATION.md` for the complete
-check results and remaining limitations.
+case, and incremental SVG output. See `docs/VALIDATION.md` for what the suite
+covers and what is not validated.

@@ -4,26 +4,16 @@
 
 Public repository: [github.com/lukaszsamson/bendler](https://github.com/lukaszsamson/bendler)
 
-New demo: [ask-driven CSV aggregation](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md), over Port and experimental NIF. A typed
-`~ask: Request -> IO(Response)` callback pulls host-owned input while parser
-state and rows stay in Bend. Its generated Elixir function takes a final
-unary handler argument. Ask and emit cannot yet be combined in one export.
-
 Call [Bend](https://www.bend-lang.org/) code from Elixir, the way Rustler calls
 Rust and Zigler calls Zig. A Bend file becomes an Elixir module: every
-exportable def is a function, and the Bend program runs either as a NIF
-inside the VM or as a port executable beside it.
+exportable def is a function, and the Bend program runs either as a port
+executable beside the VM or as a NIF inside it.
 
-**Status: feature-complete early-adopter release candidate; not yet published.**
-The CPU Port API is frozen for 0.1.x in [API.md](docs/API.md). macOS arm64 and
-Linux x86_64 are tested with Bend 2.0.20, Elixir 1.20.3 and OTP 28.
-The [release checklist](docs/MVP.md) still records an unresolved historical
-Port failure investigation. NIF and GPU are opt-in experiments, not part of
-the stable lifecycle promise (see "Limits and hazards"). Read
-`docs/RESEARCH.md` for how the Bend compiler and runtime were explored and
-why the design is what it is, `docs/REVIEW.md` for what two rounds of
-independent review found and changed, and `docs/VALIDATION.md` for what
-was verified.
+The supported surface is the CPU port binding, frozen for 0.1.x in
+[API.md](docs/API.md). The NIF and GPU lanes are opt-in experiments outside
+that promise. [DESIGN.md](docs/DESIGN.md) explains why the program serves
+requests through foreign effects, and [VALIDATION.md](docs/VALIDATION.md)
+describes what is checked.
 
 ### Support matrix
 
@@ -31,8 +21,8 @@ was verified.
 |---|---|
 | Bend | 2.0.20 only |
 | OTP | 28 baseline |
-| macOS | arm64 locally tested and verified in macOS 15 CI (Metal API baseline) |
-| Linux | x86_64 / Ubuntu 24.04 tested in CI |
+| macOS | arm64, covered by macOS 15 CI (Metal API baseline) |
+| Linux | x86_64 / Ubuntu 24.04, covered by CI |
 | Windows | Not supported |
 
 ## Usage
@@ -192,17 +182,17 @@ early (`Enum.take/2`), an exception in the consumer, and the consumer's
 death all end the turn and free the port. Events are type-checked like
 replies. Write the emitter with `~` (Bend's template marker) whenever the
 def emits more than once: a Bend function type is Type-kinded, so a
-closure binder can never be reusable. Events now also work under experimental
-`backend: :nif`. Typed `ask` callbacks also work experimentally, but an
-abandoned/failed NIF callback freezes that module until VM restart; use typed
-`Result.Fail` for recoverable application errors. Port remains recommended.
-NIF events use
-sequence-tagged messages and acknowledgements instead of Port frames.
-Early NIF stream termination returns after cancelling delivery; the native
-admission slot remains occupied until the def cooperatively finishes.
+closure binder can never be reusable.
 
-The [particle tick demo](https://github.com/lukaszsamson/bendler/blob/main/demos/particles/README.md)
-runs the same simulation on Port and NIF, writes SVG trajectories, and measures
+Events work on both backends. Port uses EVENT frames and a one-byte
+acknowledgement; the experimental NIF uses sequence-tagged
+`{:bendler_event, ref, seq, bin}` messages with sequence-checked
+acknowledgements. Early NIF stream termination returns after cancelling
+delivery; the native admission slot stays occupied until the def
+cooperatively finishes.
+
+The [particle tick demo](demos/particles/README.md) runs the same
+simulation on port and NIF, writes SVG trajectories, and measures
 scalar-event overhead separately from simulation and payload costs.
 
 The [raytracer demo](demos/raytrace/README.md)'s `fly` is the worked
@@ -210,11 +200,37 @@ example: one call renders a whole camera turn and each frame arrives in
 Elixir as it finishes, assembled into an animated PNG while the render is
 still running.
 
+### Ask callbacks into Elixir
+
+A parameter named `ask`, written `~ask: Request -> IO(Response)`, is the
+other direction: the Bend def pulls host-owned input while its own state
+stays inside Bend. The generated Elixir function takes a final unary
+handler argument.
+
+```elixir
+CsvAskPort.aggregate(16_384, 65_536, 1_000_000, fn {offset, count} ->
+  case :file.pread(io_device, offset, count) do
+    {:ok, bytes} -> {:ok, {:some, bytes}}
+    :eof -> {:ok, :none}
+    {:error, reason} -> {:error, inspect(reason)}
+  end
+end)
+```
+
+One ASK is outstanding at a time, and an export has one callback channel:
+ask or emit, not both. The handler runs in a fresh linked and monitored
+process with a fixed five-second deadline, inside the call's total
+deadline. A handler failure, an invalid response or a handler timeout
+raises `Bendler.Error` with reason `:callback`; direct same-worker reentry
+from the handler raises `:reentrant`. A typed `Result.Fail` is ordinary
+data. See the [ask-driven CSV aggregation demo](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md).
+
 Arguments are checked on the Elixir side and raise `ArgumentError`. A call
 returns the value or raises `Bendler.Error`, whose `reason` is `:busy`
 (admission limit hit), `:timeout`, `:exited` (the port died; a supervisor
-restarts it), `:dead` (the NIF runtime hit a fatal error and is frozen) or
-`:refused` (the program rejected the frame).
+restarts it), `:dead` (the NIF runtime is frozen), `:refused` (the program
+rejected the frame), `:nomem` (a native transport allocation failed),
+`:callback`, `:reentrant` or `:build`.
 
 ## How it works
 
@@ -233,9 +249,9 @@ restarts it), `:dead` (the NIF runtime hit a fatal error and is frozen) or
 ```
 
 Bendler generates a *shim*: a Bend file that imports yours, declares the
-foreign effects (`Bendler.fn`, `Bendler.arg`, `Bendler.reply`, and
-`Bendler.emit` when an export has an emitter) and a `main` that loops: read
-a function index, pull each argument, call the def, reply.
+foreign effects (`Bendler.fn`, `Bendler.arg`, `Bendler.reply`, plus
+`Bendler.emit` or `Bendler.ask` when an export needs one) and a `main` that
+loops: read a function index, pull each argument, call the def, reply.
 Bend's own compiler emits the C; the effects are ordinary Bend foreign C
 files (`priv/c/`), spliced into that C by the compiler. The same shim serves
 both backends, only the transport header differs:
@@ -246,7 +262,7 @@ both backends, only the transport header differs:
   signal handlers dropped, `_exit` → `bendler_die`) and linked as a shared
   library with a small `erl_nif` entry table. Checked initialization pins
   the library for the VM lifetime, then runs `bend_main` with `--threads N`.
-  Normal-scheduler admission precedes dirty validation/copying; native
+  Normal-scheduler admission precedes dirty validation and copying; native
   completion sends a message. Waiting uses an ordinary Elixir `receive`.
 
 Every value that crosses is a Base type the runtime lays out itself
@@ -259,31 +275,35 @@ never has to know the layout of a user constructor.
   admission is bounded (`max_queue`, `max_waiting`) and the rest are told
   `:busy` at once. Inside a call, Bend still uses every core. An event
   belongs to the one request in flight, and its acknowledgement round trip
-  is a whole pipe round trip, so events are for meaningful units of work
-  (a rendered frame), not for streaming small values.
-- **Events are cooperative.** `False` is a value the Bend def must act on.
-  A def that ignores it keeps being answered `False` until it returns;
-  only the total deadline is involuntary, and it discards the whole worker.
-  Events are not available on the NIF backend.
+  is a whole transport round trip, so events are for meaningful units of
+  work (a rendered frame), not for streaming small values.
+- **Events and asks are cooperative on both backends.** `False` is a value
+  the Bend def must act on; a def that ignores it keeps being answered
+  `False` until it returns. Only the total deadline is involuntary, and on
+  the port it discards the whole worker.
 - **Batch small calls.** With the launcher, telemetry and codec budgets,
   a short Levenshtein port call averaged 48 µs locally. A 64-pair medium
-  batch averaged 9.6 µs/pair versus Elixir's 37.8 µs/pair. Earlier ~10 µs
-  transport-only measurements are not current end-to-end latency promises.
+  batch averaged 9.6 µs/pair versus Elixir's 37.8 µs/pair. A tiny typed
+  call averaged 15.6 µs on the NIF against 19.9 µs on the port.
 - **Port deadlines stop the worker.** The owner closes the port and stops;
   a separate POSIX launcher sends TERM to the worker process group, then
   KILL after 200 ms, and reaps the child. Owner death is covered too. This
-  discards the whole worker, not just one computation. NIF cancellation
-  still does not exist: the computation finishes and its reply is dropped.
+  discards the whole worker, not just one computation.
+- **NIF cancellation of running work does not exist.** A deadline, a
+  halted stream or caller death abandons the request: the computation runs
+  to completion and its reply is dropped. Queued work can be removed;
+  running work keeps its admission slot until the def returns.
 - **A Bend runtime error freezes that module's NIF runtime**: the runtime's
   `_exit` is routed to `bendler_die`, so later calls raise `Bendler.Error`
   with reason `:dead` instead of taking the VM down. The frozen runtime keeps
   its threads and memory until the VM exits. A crash in the C runtime proper
-  (a segfault) still kills the VM, as with any NIF. The port backend has the
-  process boundary instead: a runtime error exits the worker (1), a protocol
-  error exits 65, a transport error 74, and a supervisor restarts it.
+  (a segfault) still kills the VM, as with any NIF. An abandoned or failed
+  NIF ask freezes its module the same way, because there is no safe native
+  request unwind. The port backend has the process boundary instead: a
+  runtime error exits the worker (1), a protocol error exits 65, a transport
+  error 74, and a supervisor restarts it.
 - **NIF admission precedes dirty scheduling.** `max_waiting` counts staged,
-  queued and running requests. Abandoning running work does not free its
-  slot until it finishes; queued work can be removed.
+  queued and running requests.
 - **NIF runtimes are pinned until VM exit.** A retained callback-bearing
   resource prevents code purge from unloading code beneath live threads.
   It deliberately retains the library, threads and memory; this is not
@@ -312,35 +332,19 @@ never has to know the layout of a user constructor.
 - `Nat` values are limited to `2^48-1`; the codec rejects larger integers.
 - The GPU lane (`f!(x)`) works through a port (Metal on macOS, CUDA on
   Linux when installed) and is off unless `gpu:` says otherwise; a NIF
-  runs `!` on the CPU pool. Whether it is faster is the kernel's shape,
-  not a flag: see the ray tracer demo's GPU section.
-  A toolkit without a visible device produces a CPU-capable executable with
-  no `.gpu` sidecar. Rebuild with `mix compile.bendler --force` on the GPU
-  host before enabling that lane. Hosted CI does not promise GPU coverage.
+  runs `!` on the CPU pool and refuses the option. Whether it is faster is
+  the kernel's shape, not a flag: the ray tracer's scene-as-list renderer
+  is about 50x slower per pixel on the device. Per-bang work must stay
+  moderate, because macOS aborts a long Metal command buffer and the
+  worker exits 1. A toolkit without a visible device produces a
+  CPU-capable executable with no `.gpu` sidecar. Rebuild with
+  `mix compile.bendler --force` on the GPU host before enabling that lane.
+  Hosted CI does not promise GPU coverage.
 - The C side depends on runtime internals (`io_eff`, `io_str`, `ctr_take`,
   ...). Bend promises no ABI: rebuild on every Bend update (the build hash
   includes the `bend version`).
 
 ## Layout
-
-The [parallel Mandelbrot demo](demos/mandelbrot/README.md) compares a
-CPU Port kernel with scalar Elixir and Nx/EXLA, including thread scaling,
-exact upstream checksums, and reproducible benchmark commands.
-The [sorting and set-operations demo](demos/sorting/README.md) compares
-tree-bitonic sorting with `Enum.sort` and `MapSet`, including list round-trip
-costs and cases where more Bend workers make performance worse.
-The [small CSV parser](demos/csv/README.md) uses tuples, Maybe and Result,
-with byte-preserving fields and differential tests against NimbleCSV.
-Its lazy `CsvStream.parse_stream/2` also parses arbitrary chunks over Port or
-the experimental NIF, with bounded records/batches and demand-driven input.
-This uses incremental typed calls, not general Bend-to-BEAM effects.
-The [raytracer](demos/raytrace/README.md) takes its whole scene as user
-datatypes and answers packed RGB `Bytes`, with parallel tiles, an
-Elixir-owned tile schedule and deadline, a PNG writer, and a bit-exact
-upstream checksum beside the F32-against-doubles comparison. Its camera
-fly-through is the worked example of typed events: one call renders a
-whole turn and each frame arrives as it finishes, into an animated PNG
-that grows while the render runs.
 
 ```
 lib/bendler.ex          use Bendler: builds at compile time, defines the functions
@@ -350,15 +354,31 @@ lib/bendler/build.ex    runs bend and clang, caches by input hash
 lib/bendler/codec.ex    the frame codec
 lib/bendler/port.ex     the port owner: bounded queue, deadline, events, exit codes
 lib/mix/tasks/          mix compile.bendler and mix bendler.clean
-priv/c/                 the four foreign effects and the two transports
+priv/c/                 the foreign effects and the two transports
 priv/bend/bendler.bend  the prelude (Bytes), copied next to sources that use it
 bend/fib.bend           the example module
 test/support/           Bendler.Examples.FibNif and FibPort, and the crash and admission fixtures
 demos/<name>/           a real port each (Bend source, port module, reference, tests, bench)
 test/                   the suite (mix test)
-docs/RESEARCH.md        findings, alternatives, roadmap
-docs/REVIEW.md          what independent review found, and what changed
-docs/VALIDATION.md      what was verified, and how
-docs/BEAM_API.md        which parts of erl_nif and erl_driver this needs
-docs/MVP.md             the task list from PoC to MVP
+docs/API.md             the stable 0.1.x surface
+docs/TYPES.md           the type and value mapping
+docs/CONTRACTS.md       operational semantics, budgets, errors, telemetry
+docs/DESIGN.md          why the design is what it is
+docs/NIF.md             the experimental NIF backend
+docs/VALIDATION.md      what is checked, and what is not
+docs/ROADMAP.md         what is waiting on Bend upstream, and what is deferred
 ```
+
+### Demos
+
+| Demo | What it shows |
+|---|---|
+| levenshtein (no README) | batching independent CPU work across the boundary |
+| [murmur3](demos/murmur3/README.md) | packed `B.Bytes` against a list of bytes: 0.28 ms vs 8.5 ms for 64 KB |
+| [thumbhash](demos/thumbhash/README.md) | a real numeric/image kernel, and F32 against doubles |
+| [mandelbrot](demos/mandelbrot/README.md) | CPU parallelism against scalar Elixir and Nx/EXLA, with thread scaling |
+| [sorting](demos/sorting/README.md) | when the work should stay in Elixir: transport can exceed `Enum.sort` |
+| [csv](demos/csv/README.md) | tuples, Maybe and Result; eager and lazy streaming parsing against NimbleCSV |
+| [csv ask](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md) | a typed `ask` callback pulling host-owned input, aggregating inside Bend |
+| [raytrace](demos/raytrace/README.md) | user datatypes in, `Bytes` out, parallel tiles, typed events, the GPU lane |
+| [particles](demos/particles/README.md) | event delivery on port against the experimental NIF |

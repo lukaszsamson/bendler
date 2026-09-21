@@ -113,10 +113,10 @@ EXLA's first calls were 43.341 / 68.616 / 58.854 ms, separate from warm timings.
 
 A separate full-viewport `(18, 51)` Bend call, twelve workers, returned the
 upstream `3101455856` checksum in 903.548 ms (single first-call observation,
-not a warm median and not part of the above comparison). The default test
-suite also verifies this known answer with four workers. Five new tests cover
-one/four-thread checksums, sampled pixel escape counts, invalid wrapper inputs,
-and the full upstream case. The complete project suite passed 51 tests.
+not a warm median and not part of the above comparison). The test suite
+also verifies this known answer with four workers, alongside one- and
+four-thread checksums, sampled pixel escape counts, invalid wrapper inputs
+and the full upstream case.
 
 The BinaryBackend is dramatically slower on this workload (the 262,144-pixel
 baseline takes tens of seconds per sample); use smaller `DEPTHS` for a quick
@@ -132,6 +132,5 @@ is no floating-point tolerance hiding incorrect results.
 No GPU build support was added. The imported upstream `main` contains a `!`
 call, but Bendler reaches `rend` through its generated CPU dispatcher; the
 generated C has `BANGS 0` and the worker runs with `--gpu off`. Merely changing
-a command-line flag would not offload this binding. GPU work still needs an
-offload-marked dispatch root, platform build/link flags, sidecar generation and
-packaging, and correctness/lifecycle tests. It remains a separate MVP task.
+a command-line flag would not offload this binding. Offloading this kernel would
+need an offload-marked dispatch root, not a different command-line flag.

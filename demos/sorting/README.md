@@ -126,9 +126,3 @@ operations against MapSet, duplicate-heavy randomized pairs, set identities,
 and rejection of invalid U32 values. Benchmarks additionally compare every
 timed result at the larger sizes. No checksum-only equality or floating-point
 tolerance is used.
-
-Validation after adding this demo: the complete suite passed 55 tests;
-compilation with warnings-as-errors, explicit demo formatting checks, and
-`mix credo 'demos/sorting/**/*.{ex,exs}' --strict` passed. The full suite
-still emits the pre-existing unused `Bitwise` require warning in ThumbHash's
-test file; no unrelated demo files were changed.

@@ -59,15 +59,12 @@ defmodule Bendler.MixProject do
         "README.md",
         "CHANGELOG.md",
         "docs/API.md",
-        "docs/RESEARCH.md",
-        "docs/REVIEW.md",
-        "docs/VALIDATION.md",
-        "docs/BEAM_API.md",
-        "docs/NIF_ROADMAP.md",
         "docs/TYPES.md",
         "docs/CONTRACTS.md",
-        "docs/TRACK2.md",
-        "docs/MVP.md"
+        "docs/DESIGN.md",
+        "docs/NIF.md",
+        "docs/VALIDATION.md",
+        "docs/ROADMAP.md"
       ]
     ]
   end

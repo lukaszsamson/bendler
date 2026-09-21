@@ -1,8 +1,8 @@
 # Composite type contract
 
 Products, Maybe and Result are supported in arguments and return values on
-both the Port and experimental NIF backends. They compose with lists and all
-existing primitive types, including the Bytes prelude.
+both the Port and the experimental NIF backend. They compose with lists and
+the primitive types, including the Bytes prelude.
 
 | Bend type / constructor | Elixir value |
 |---|---|
@@ -24,15 +24,18 @@ Unparenthesized product chains map to flat Elixir tuples, although Bend's
 underlying Tuple nodes are right-associated. Explicit parentheses retain
 nested Elixir tuple shape. Tuples have 2–16 fields and type-expression nesting is
 limited to 32 levels (runtime values may nest up to 2048 levels). Kind-qualified spellings such as `List<&2, U32>` and
-`Result<&2, &2, U32, String>` are accepted by the signature reader. Existing
-single-line signature and unsupported-user-datatype restrictions remain.
+`Result<&2, &2, U32, String>` are accepted by the signature reader. The
+unsupported-user-datatype restrictions below still keep a def out.
 
 ## Wire and runtime representation
 
-New value tags are 8 (tuple: one-byte arity, then field values), 9 (None),
-10 (Some plus value), 11 (Done plus value) and 12 (Fail plus error). Tag 0
-alone denotes a transport error. Counts and primitive payloads retain the
-existing big-endian encoding. The trusted generated prefix type specs use
+The wire tags are 0 (a transport error alone), 1 `U32`, 2 `Nat`,
+3 `String`, 4 `Bool`, 5 `Unit`, 6 `List`, 7 `Bytes`, 8 tuple (a one-byte
+arity, then the field values), 9 `None`, 10 `Some` plus value, 11 `Done`
+plus value, 12 `Fail` plus error, 13 `F32`, 14 `Char` and 15 a datatype
+(constructor index, field count, then the fields). 16 and 17 are not value
+tags: they lead an EVENT and an ASK frame. Counts and primitive payloads
+are big-endian. The trusted generated prefix type specs use
 `T<arity>:<fields>`, `M<child>` and `R<error><value>`; `L<child>` remains a
 list. Both type-spec traversal and request validation are bounded.
 
@@ -45,13 +48,13 @@ trailing bytes have regression coverage.
 
 The C codec uses Base's canonical Tuple/Some/None/Done/Fail constructors at
 the foreign-effect boundary, where the compiler boxes specialized values.
-It does not infer arbitrary user-defined constructor layouts. This is still
-an internal Bend 2.0.20 ABI, not a new stable foreign-library ABI. Rebuild
+It does not infer arbitrary user-defined constructor layouts. This is
+an internal Bend 2.0.20 ABI, not a stable foreign-library ABI. Rebuild
 native artifacts when upgrading Bendler or Bend; no mixed-version wire
 negotiation is provided. Generated modules receive matching Elixir specs.
 
-See `test/composite_test.exs` for nested values and both transports, and
-`demos/csv/` for a real parser using all three new type families.
+See `test/composite_test.exs` for nested values on both transports, and
+`demos/csv/` for a parser using tuples, Maybe and Result together.
 
 ## F32, Char and Map
 
@@ -224,11 +227,12 @@ At most one event is outstanding, so the worker cannot run ahead of its
 consumer. A `False` is the only cancellation there is: it is typed, it is
 cooperative, and a def that ignores it simply keeps being told `False`.
 
-Events work on Port and experimental NIF. The NIF delivers a typed payload
-in `{:bendler_event, ref, sequence, binary}` and accepts acknowledgements
-against the resource and sequence. These envelopes and native entry points
-are internal; use the same generated `_stream` Enumerable on either backend.
-Sequential IO-only exports and typed ask callbacks are supported too.
+Events work on Port and the experimental NIF. The NIF delivers a typed
+payload in `{:bendler_event, ref, sequence, binary}` and accepts
+acknowledgements against the resource and sequence. These envelopes and
+native entry points are internal; use the same generated `_stream`
+Enumerable on either backend. Sequential IO-only exports and typed ask
+callbacks work on both backends too.
 
 ## Typed ask callbacks
 
