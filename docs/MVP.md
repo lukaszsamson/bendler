@@ -23,9 +23,10 @@ closed while adopting the reviews.
       `mix test`, format, warnings-as-errors, credo, dialyzer, plus the
       consumer-app check, the clean-then-compile workflow and the
       compiler-free release run.
-- [ ] Linux build: drop `-undefined dynamic_lookup`, add `-lX11`/`-lasound`
-      only when the emitted C includes them, confirm the runtime's
-      fixed-hint `mmap` coexists with the BEAM's allocators, and exercise
+- [x] Linux build: omit `-undefined dynamic_lookup`; supported pure-function
+      programs need neither X11 nor ALSA (Window/Audio effects remain outside
+      the contract). Ubuntu 24.04 CI confirms the runtime's fixed-hint `mmap`
+      coexists with the BEAM's allocators on that runner, and exercises
       checked NIF initialization and finite call deadlines that succeed
       and expire. The initialization condition variable uses a monotonic
       clock on Linux; call deadlines use monotonic timestamps and Elixir
@@ -50,7 +51,7 @@ functions. In order:
 - [x] Property/fuzz tests for both codecs: deterministic truncation,
       nesting, frame caps, invalid UTF-8 and malformed replies. Local ASan
       passed 100 composite cycles plus 500 fuzz frames. The checksum-pinned
-      macOS/Linux CI workflow runs it too; remote CI has not yet been run.
+      macOS/Linux CI workflow runs it too; Linux remote CI has passed.
 - [x] Decoded-size admission budgets (64 MiB native/host default) and a
       sustained 2,560-call overload/RSS check. This is not an OS RSS cap;
       user computations and allocator retention are outside codec budgets.

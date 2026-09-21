@@ -334,8 +334,28 @@ NIF used its default thread count; Port used two. These are serial tiny-call
 averages, not direct-call NIF latency or a universal performance claim. They
 do not justify treating the experimental NIF as equivalent to Port isolation.
 
-CI now invokes all three isolated NIF scripts. Remote CI and Linux execution
-remain unverified here. Runtime pinning intentionally retains threads, the
+CI now invokes all three isolated NIF scripts. The local results above predate
+remote execution; see the publication checks below. Runtime pinning intentionally retains threads, the
 library and runtime memory until VM exit; fatal current requests also remain
 retained because other runtime workers may still access them. Hard
 cancellation, graceful unload, hot upgrade and runtime restart are not solved.
+
+## Public repository and Linux CI (2026-09-21)
+
+The public repository is https://github.com/lukaszsamson/bendler. The Linux
+job in [run 35571069189](https://github.com/lukaszsamson/bendler/actions/runs/35571069189)
+passed on Ubuntu 24.04 x86_64 with Bend 2.0.20, LLVM 21.1.8, OTP 28.1 and
+Elixir 1.20.3. It ran 115 tests, formatting, warnings-as-errors, strict Credo,
+Dialyzer, docs, 100 ASan composite cycles plus 500 fuzz frames, overload/RSS,
+consumer clean/rebuild and a compiler-free release, and all three isolated
+NIF probes (purge/reload, initialization failures, and scheduler admission).
+This tests coexistence with BEAM allocation and finite NIF deadlines on that
+runner; it is not a general native-memory-safety or platform guarantee.
+
+Publishing exposed three setup/test assumptions: the Bend archive has a
+top-level directory, upstream LLVM needs macOS SDK discovery, and release
+assertions must inspect Mix's build `priv`, not assume a source-tree symlink.
+The macOS run additionally exposed a mismatch between Apple's linker and
+LLVM's bundled libc++; CI now selects the matching Mach-O LLD. Its full
+remote validation is pending. A local `mix hex.build` also passed; no Hex
+package has been published.

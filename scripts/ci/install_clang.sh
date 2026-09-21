@@ -51,6 +51,11 @@ echo "${destination}/bin" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
 # Upstream LLVM does not discover the Xcode SDK the way Apple clang does.
 # Export its sysroot for every later build, including ASan and isolated probes.
 if [[ "${LLVM_ASSET}" == *macOS* ]]; then
+  # Apple's ld can load LLVM's bundled libc++ and abort on missing symbols.
+  # Use the matching Mach-O LLD for all clang calls, including shared/ASan
+  # builds. Append so any upstream default configuration is preserved.
+  test -x "${destination}/bin/ld64.lld"
+  cat "$(dirname "${BASH_SOURCE[0]}")/clang.cfg" >> "${destination}/bin/clang.cfg"
   sdkroot=$(xcrun --sdk macosx --show-sdk-path)
   test -d "${sdkroot}"
   echo "SDKROOT=${sdkroot}" >> "${GITHUB_ENV:?GITHUB_ENV is required}"

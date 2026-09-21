@@ -22,5 +22,5 @@ This release is not published yet. The current tree includes:
 ## Support status
 
 The supported toolchain is Bend 2.0.20 with OTP 28. macOS arm64 is locally
-tested. Linux is covered by the checked-in CI workflow but is pending its
-initial run; Windows is not supported.
+tested. Linux x86_64 / Ubuntu 24.04 has passed the checked-in CI workflow,
+including the isolated experimental NIF probes. Windows is not supported.

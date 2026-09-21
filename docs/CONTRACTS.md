@@ -95,7 +95,7 @@ death can leave a start event without its matching completion event.
 | Target | Bend toolchain pin | CPU port status | NIF status |
 |---|---|---|---|
 | macOS arm64 | Bend 2.0.20 archive, SHA-256 pinned in CI | tested baseline | experimental; no release promise |
-| Linux x86_64 | Bend 2.0.20 archive, SHA-256 pinned in CI | workflow configured, not yet run/verified here | experimental; no release promise |
+| Linux x86_64 | Bend 2.0.20 archive, SHA-256 pinned in CI | Ubuntu 24.04 CI verified | isolated probes pass; still experimental |
 | Other targets | not packaged by this project | unsupported | unsupported |
 
 The CPU binding contract covers bounded pure functions, not Bend's Window or
