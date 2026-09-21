@@ -264,7 +264,8 @@ accepting. Values are the script's averages on this macOS arm64 host.
 CI has been added for macOS arm64 and Linux x86_64 with Bend 2.0.20 release
 archive SHA-256 pins (from upstream's release-generated flake), OTP 28.0,
 Elixir 1.20.3 and locked dependencies. No remote CI run was performed here;
-Linux results and runner/toolchain compatibility are still pending.
+At that stage Linux results were pending; the publication checks below now
+record completed remote validation.
 
 Final local checks: **106 tests passed** with warnings as errors, formatting,
 strict Credo, Dialyzer (zero errors), and documentation generation passed.
@@ -356,6 +357,20 @@ Publishing exposed three setup/test assumptions: the Bend archive has a
 top-level directory, upstream LLVM needs macOS SDK discovery, and release
 assertions must inspect Mix's build `priv`, not assume a source-tree symlink.
 The macOS run additionally exposed a mismatch between Apple's linker and
-LLVM's bundled libc++; CI now selects the matching Mach-O LLD. Its full
-remote validation is pending. A local `mix hex.build` also passed; no Hex
-package has been published.
+LLVM's bundled libc++; CI now selects the matching Mach-O LLD. A local
+`mix hex.build` also passed; no Hex package has been published.
+
+The final [run 35572044841](https://github.com/lukaszsamson/bendler/actions/runs/35572044841)
+passed every step on **both macOS 15 arm64 and Ubuntu 24.04 x86_64** at code
+revision `465c155`. macOS ran all 116 tests, including the real GPU test;
+Linux explicitly skips that Metal-only test. Both jobs passed ASan, release
+and isolated NIF checks. macOS 15 is the CI baseline because Bend's emitted
+Metal code uses `MTLCompileOptions.mathMode`, introduced in macOS 15.
+
+The GPU test now remains visible when skipped for a missing device sidecar.
+Builds no longer attempt to publish a nonexistent sidecar when Bend's
+`--gpu-build` succeeds without a visible device. That no-device branch is
+grounded in Bend's documented/generated behavior; this macOS CI runner did
+have a device, so its passing test is not evidence for a headless Metal run.
+Local raytracer validation after the change also passed all 12 tests, and
+strict Credo reported no issues.

@@ -18,8 +18,10 @@ closed while adopting the reviews.
 - [x] (done) Atomic staging; per-app build requests; `clean` keeps requests.
 - [x] `CHANGELOG.md`; a support matrix stated plainly: Bend 2.0.20 only,
       OTP 28 baseline, macOS arm64 tested, Linux via CI, no Windows.
-- [ ] Pinned-toolchain CI on macOS and Linux (configured; remote validation
-      pending): checksum-verified Bend 2.0.20 and LLVM 21.1.8 installers,
+- [x] Pinned-toolchain CI on macOS 15 arm64 and Ubuntu 24.04 x86_64
+      ([passing run](https://github.com/lukaszsamson/bendler/actions/runs/35572044841)):
+      checksum-verified Bend 2.0.20 and LLVM 21.1.8 installers, OTP 28.1,
+      Elixir 1.20.3, commit-pinned actions,
       `mix test`, format, warnings-as-errors, credo, dialyzer, plus the
       consumer-app check, the clean-then-compile workflow and the
       compiler-free release run.
@@ -51,7 +53,7 @@ functions. In order:
 - [x] Property/fuzz tests for both codecs: deterministic truncation,
       nesting, frame caps, invalid UTF-8 and malformed replies. Local ASan
       passed 100 composite cycles plus 500 fuzz frames. The checksum-pinned
-      macOS/Linux CI workflow runs it too; Linux remote CI has passed.
+      macOS/Linux CI workflow runs it too; both remote jobs have passed.
 - [x] Decoded-size admission budgets (64 MiB native/host default) and a
       sustained 2,560-call overload/RSS check. This is not an OS RSS cap;
       user computations and allocator retention are outside codec budgets.

@@ -23,7 +23,7 @@ was verified.
 |---|---|
 | Bend | 2.0.20 only |
 | OTP | 28 baseline |
-| macOS | arm64 locally tested; CI targets macOS 15 (Metal API baseline) |
+| macOS | arm64 locally tested and verified in macOS 15 CI (Metal API baseline) |
 | Linux | x86_64 / Ubuntu 24.04 tested in CI |
 | Windows | Not supported |
 

@@ -180,7 +180,8 @@ defmodule Bendler.Demos.RaytraceTest do
   # its presence proves that this compiled port includes a device program. It
   # does not probe or start a GPU while ExUnit discovers tests; macOS is the
   # supported Metal host and other hosts explicitly report this test skipped.
-  @gpu_artifact Bendler.Build.artifact_path(:bendler, "bendler_demos_raytrace_port", :port) <> ".gpu"
+  @gpu_artifact Bendler.Build.artifact_path(:bendler, "bendler_demos_raytrace_port", :port) <>
+                  ".gpu"
   @gpu_available match?({:unix, :darwin}, :os.type()) and File.regular?(@gpu_artifact)
 
   @tag skip:
