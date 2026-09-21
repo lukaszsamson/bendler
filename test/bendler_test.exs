@@ -21,6 +21,15 @@ defmodule BendlerTest do
     e in Bendler.Error -> e.reason
   end
 
+  defp await_admission(owner, running, queued \\ nil) do
+    assert eventually(fn ->
+             state = :sys.get_state(owner)
+             active = state.inflight && elem(state.inflight.from, 0)
+             waiting = Enum.map(:queue.to_list(state.queue), &elem(&1.from, 0))
+             active == running.pid and waiting == if(queued, do: [queued.pid], else: [])
+           end)
+  end
+
   test "the gpu option is checked" do
     base = [otp_app: :bendler, source: "bend/fib.bend"]
     assert Bendler.config!(X, base ++ [gpu: :on]).gpu == :on
@@ -276,17 +285,24 @@ defmodule BendlerTest do
   end
 
   describe "port admission and deadline" do
-    test "a full queue says busy; a missed deadline stops the owner and a supervisor replaces it" do
-      pid = start_supervised!({SlowPort, []})
-      ref = Process.monitor(pid)
-      # one in flight, one queued (max_queue: 1), the third is refused
-      t1 = Task.async(fn -> reason(fn -> SlowPort.slow(30) end) end)
-      Process.sleep(20)
-      t2 = Task.async(fn -> reason(fn -> SlowPort.slow(30) end) end)
-      Process.sleep(20)
+    test "a full queue says busy independently of deadline scheduling" do
+      pid = start_supervised!({SlowPort, timeout: :infinity})
+      # Establish actual admission order; sleeps cannot guarantee this on CI.
+      # This workload cannot complete while the test arranges the queue.
+      t1 = Task.async(fn -> reason(fn -> SlowPort.slow(40) end) end)
+      await_admission(pid, t1)
+      t2 = Task.async(fn -> reason(fn -> SlowPort.slow(40) end) end)
+      await_admission(pid, t1, t2)
       assert reason(fn -> SlowPort.slow(30) end) == :busy
-      assert Task.await(t1, 5_000) == :timeout
+      :ok = stop_supervised(SlowPort)
+      assert Task.await(t1, 5_000) == :exited
       assert Task.await(t2, 5_000) == :exited
+    end
+
+    test "a real deadline stops the owner and a supervisor replaces it" do
+      pid = start_supervised!({SlowPort, timeout: 1000})
+      ref = Process.monitor(pid)
+      assert reason(fn -> SlowPort.slow(40) end) == :timeout
       assert_receive {:DOWN, ^ref, :process, ^pid, {:shutdown, :timeout}}, 1_000
       # Restart and the launcher's TERM/KILL grace period are asynchronous;
       # wait for service recovery rather than assuming a 50 ms cold start.
@@ -294,7 +310,7 @@ defmodule BendlerTest do
     end
 
     test "an invalid request is refused before the def runs, and the worker lives on" do
-      start_supervised!({SlowPort, []})
+      start_supervised!({SlowPort, timeout: 5000})
       # function 0 (slow) with a U32 where a Nat is declared
       assert {{:error, "expected a Nat"}, ""} =
                Bendler.Codec.decode(Bendler.Port.call(SlowPort, <<0::32, 1, 0, 0, 0, 1>>))
@@ -324,12 +340,12 @@ defmodule BendlerTest do
     end
 
     test "queued callers are released when the port dies" do
-      pid = start_supervised!({SlowPort, []})
+      pid = start_supervised!({SlowPort, timeout: :infinity})
       ref = Process.monitor(pid)
-      t1 = Task.async(fn -> reason(fn -> SlowPort.slow(30) end) end)
-      Process.sleep(20)
-      t2 = Task.async(fn -> reason(fn -> SlowPort.slow(30) end) end)
-      Process.sleep(20)
+      t1 = Task.async(fn -> reason(fn -> SlowPort.slow(40) end) end)
+      await_admission(pid, t1)
+      t2 = Task.async(fn -> reason(fn -> SlowPort.slow(40) end) end)
+      await_admission(pid, t1, t2)
       Port.close(:sys.get_state(pid).port)
       assert Task.await(t1, 5_000) == :exited
       assert Task.await(t2, 5_000) == :exited

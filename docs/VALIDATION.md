@@ -1,5 +1,25 @@
 # Validation record
 
+## 2026-09-21: remove the admission/deadline test race
+
+[CI run 35612050570](https://github.com/lukaszsamson/bendler/actions/runs/35612050570)
+passed the complete Ubuntu job, including the new package and transport-stress
+checks. macOS passed 198/199 tests; the combined admission/deadline test expected
+`:busy` but saw `:exited`. It arranged callers with two 20 ms sleeps while a
+150 ms owner deadline was active, allowing scheduler delays to invalidate the
+assertion. This was not a reported transport status-74 failure.
+
+The admission and worker-death tests now disable deadlines and inspect the
+actual in-flight/queued caller identities before proceeding. A separate test
+retains a real finite timer and asserts `:timeout`, owner shutdown and supervised
+recovery. Invalid-frame checks use a longer independent timeout. Production
+timeouts and admission semantics are unchanged; no alternative error is accepted
+to make the busy assertion pass.
+
+Local validation: the targeted module passed 22 tests, and the full suite passed
+**200 tests** with the failing seed 616945, three BEAM schedulers (`+S 3:3`) and
+`--max-cases 6`. Formatting and strict Credo passed.
+
 ## 2026-09-21: release confidence and status-74 investigation
 
 Local macOS arm64, Bend 2.0.20, Elixir 1.20.3, OTP 28:
