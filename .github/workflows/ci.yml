@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             bend_target: darwin-arm64
             bend_sha256: e8da8e28ea963e4d3956b4ab80f1c1df9a8c5208dbd6ef1e3e49bb913ed0f374
             llvm_asset: LLVM-21.1.8-macOS-ARM64.tar.xz

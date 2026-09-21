@@ -325,7 +325,11 @@ defmodule Bendler.Build do
     )
 
     if gpu, do: run!(staged, ["--gpu-build"], build_dir)
-    gpu != nil
+    # Bend exits successfully without writing a device program when the
+    # toolkit is installed but no GPU is visible (for example a hosted VM).
+    # Publish the CPU-capable executable without trying to rename a missing
+    # sidecar; a later GPU request still reports the runtime's refusal.
+    gpu != nil and File.regular?(staged <> ".gpu")
   end
 
   # a NIF runs `!` calls on the CPU pool: the runtime finds its GPU program

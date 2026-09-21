@@ -23,7 +23,7 @@ was verified.
 |---|---|
 | Bend | 2.0.20 only |
 | OTP | 28 baseline |
-| macOS | arm64 locally tested |
+| macOS | arm64 locally tested; CI targets macOS 15 (Metal API baseline) |
 | Linux | x86_64 / Ubuntu 24.04 tested in CI |
 | Windows | Not supported |
 
@@ -238,6 +238,9 @@ never has to know the layout of a user constructor.
   Linux when installed) and is off unless `gpu:` says otherwise; a NIF
   runs `!` on the CPU pool. Whether it is faster is the kernel's shape,
   not a flag: see the ray tracer demo's GPU section.
+  A toolkit without a visible device produces a CPU-capable executable with
+  no `.gpu` sidecar. Rebuild with `mix compile.bendler --force` on the GPU
+  host before enabling that lane. Hosted CI does not promise GPU coverage.
 - The C side depends on runtime internals (`io_eff`, `io_str`, `ctr_take`,
   ...). Bend promises no ABI: rebuild on every Bend update (the build hash
   includes the `bend version`).

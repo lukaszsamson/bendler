@@ -176,20 +176,26 @@ defmodule Bendler.Demos.RaytraceTest do
     assert for(<<0, row::binary-size(^stride) <- lines>>, into: <<>>, do: row) == rgb
   end
 
-  # The GPU lane: only where a GPU is at hand (macOS with Metal). With
-  # `gpu: :on` the `!` calls run on the device and must agree with the CPU.
-  @gpu match?({:unix, :darwin}, :os.type())
+  # A `.gpu` sidecar is written only after Bend's `--gpu-build` succeeds, so
+  # its presence proves that this compiled port includes a device program. It
+  # does not probe or start a GPU while ExUnit discovers tests; macOS is the
+  # supported Metal host and other hosts explicitly report this test skipped.
+  @gpu_artifact Bendler.Build.artifact_path(:bendler, "bendler_demos_raytrace_port", :port) <> ".gpu"
+  @gpu_available match?({:unix, :darwin}, :os.type()) and File.regular?(@gpu_artifact)
 
-  if @gpu do
-    test "the GPU lane renders the upstream scene bit-exactly and a tile the same as the CPU" do
-      start_supervised!({RaytracePort, threads: 4, gpu: :on, timeout: 60_000})
-      assert RaytracePort.upstream_checksum_gpu(6, 80) == 402_971
-      assert RaytracePort.upstream_checksum_gpu(3, 40) == 19_281
-      scene = RaytracePort.default_scene()
-      [gpu] = RaytracePort.render_tiles_gpu(scene, 640, 480, [{64, 64, 64, 64}])
-      [cpu] = RaytracePort.render_tiles(scene, 640, 480, [{64, 64, 64, 64}])
-      assert gpu == cpu
-    end
+  @tag skip:
+         if(@gpu_available,
+           do: false,
+           else: "requires a macOS build with #{Path.basename(@gpu_artifact)}"
+         )
+  test "the GPU lane renders the upstream scene bit-exactly and a tile the same as the CPU" do
+    start_supervised!({RaytracePort, threads: 4, gpu: :on, timeout: 60_000})
+    assert RaytracePort.upstream_checksum_gpu(6, 80) == 402_971
+    assert RaytracePort.upstream_checksum_gpu(3, 40) == 19_281
+    scene = RaytracePort.default_scene()
+    [gpu] = RaytracePort.render_tiles_gpu(scene, 640, 480, [{64, 64, 64, 64}])
+    [cpu] = RaytracePort.render_tiles(scene, 640, 480, [{64, 64, 64, 64}])
+    assert gpu == cpu
   end
 
   test "the GPU defs run on the CPU pool when the port has no GPU" do
