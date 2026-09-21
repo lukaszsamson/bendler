@@ -16,6 +16,16 @@ This release is not published yet. The current tree includes:
   caller monitoring, checked initialization, caller-side deadlines, and
   VM-lifetime pinning to keep live runtime code mapped. Graceful NIF unload is
   not implemented; the port backend remains the MVP default.
+- Typed, bounded events out of Bend: a def answering `IO(T)` is an export, and
+  a `~emit: E -> IO(Bool)` parameter is its typed event sink. A fourth foreign
+  effect writes an EVENT frame (`BL_EVENT`, tag 16) and parks on the host's
+  one-byte acknowledgement, so at most one event is outstanding and `False` is
+  a typed, cooperative cancellation. Each such export gets a generated
+  `_stream` function whose demand drives the acknowledgements. Port only: an
+  `IO(T)` export is refused under `backend: :nif`.
+- The ray tracer demo grew a camera fly-through (`fly`, `fly_gpu`) whose single
+  call emits every frame as it finishes, and an animated-PNG writer that
+  appends frames to the file while the render is still running.
 - An experimental GPU-shaped port lane for programs using `!`; performance and
   availability depend on the kernel and installed platform toolchain.
 - Public macOS 15 arm64 / Ubuntu 24.04 x86_64 CI with checksum-pinned Bend and

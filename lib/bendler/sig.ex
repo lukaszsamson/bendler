@@ -12,8 +12,25 @@ defmodule Bendler.Sig do
   `Map.from_list` and `Map.to_list` on the Bend side; a Map nested inside
   another type is not supported. Products have 2–16 fields; nesting is
   capped at 32. Kind-qualified generics and reusable (`+`) types are
-  accepted. Erased (`-`) and template (`~`) parameters, `IO` results and
-  every other type keep a def out.
+  accepted. Erased (`-`) and template (`~`) parameters and every other type
+  keep a def out.
+
+  ## Effectful exports and emitters
+
+  A def whose result is `IO(T)`, `T` marshalled, is exported too: the shim
+  binds the result in its `do` block and replies with it. Such a def may
+  take one **emitter** parameter, whose type is `T -> IO(Bool)`. An emitter
+  is not a wire argument; the shim supplies a lambda over `Bendler.emit`,
+  and every event is encoded, and checked on the Elixir side, exactly as a
+  reply of that type is.
+
+  Write the emitter with `~`, Bend's template marker, when the def emits
+  more than once: a Bend function type is Type-kinded ("a closure
+  captures"), so a closure binder can never be `+` and an ordinary
+  parameter could be applied only once. A template is substituted as
+  syntax at compile time and has no such limit. `+emit:` is refused with
+  that reason, and a plain `emit:` is accepted for a def emitting at most
+  once. An emitter needs an `IO(T)` result, and there may be only one.
 
   ## User datatypes
 

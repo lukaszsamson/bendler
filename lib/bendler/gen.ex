@@ -1,11 +1,14 @@
 defmodule Bendler.Gen do
   @moduledoc """
   Writes the shim: a Bend file whose `main` serves requests from the host
-  through three foreign effects. `Bendler.fn` waits for the next request and
+  through foreign effects. `Bendler.fn` waits for the next request and
   answers its function index; `Bendler.arg` reads one argument of the type
   its spec spells; `Bendler.reply` writes the result back. The shim matches
   the index in `Bendler.step`, pulls the arguments, calls the user's def and
-  replies. Values cross using Base's canonical boxed types and the controlled
+  replies. A def answering `IO(T)` has its result bound in that `do` block
+  first; one taking an emitter (`~emit: T -> IO(Bool)`) receives a lambda
+  over a fourth effect, `Bendler.emit`, which is declared only when some
+  export needs it. Values cross using Base's canonical boxed types and the controlled
   prelude (`Bytes`, `Dyn`); the C side does not infer arbitrary
   user-constructor layouts.
 

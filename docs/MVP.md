@@ -127,9 +127,36 @@ Outside the MVP promise; `BEAM_API.md` has the API specifics.
 GPU-shaped kernels (the lane itself builds and runs through a port; the
 ray tracer demo shows why a scene-as-list kernel does not gain from it),
 the direct-call compiler patch (the real NIF speed-up; upstream
-WONTFIX #813 is the hook), an inline `~B` sigil, arbitrary BEAM effects
-from Bend, and more than one request in flight (`IO.fork` alone is not
-enough while the codec's cursor is global).
+WONTFIX #813 is the hook), an inline `~B` sigil, `ask`-shaped callbacks
+(an effect that takes an answer *of a chosen type* back from the BEAM,
+rather than the Bool an emit gets), events under the NIF transport, and
+more than one request in flight (`IO.fork` alone is not enough while the
+codec's cursor is global).
+
+## 5b. Done: typed events out of Bend, with acknowledgement backpressure
+
+A def whose result is `IO(T)` is an export, and a parameter written
+`~emit: T -> IO(Bool)` is its typed event sink. The shim passes a lambda
+over a fourth foreign effect, `Bendler.emit(-A, spec, x)`, which encodes
+`x` with the same codec a reply uses, writes it as an EVENT frame
+(`BL_EVENT`, tag 16) and then parks on the host's one-byte
+acknowledgement frame using the runtime's own `io_wait_on`, so the loop
+is never spun.
+
+That acknowledgement is the whole backpressure and cancellation story: at
+most one event is outstanding, the worker cannot run ahead of the
+consumer, and a `False` is a typed, cooperative "stop" the def sees as an
+ordinary value. The generated `fun_stream` drives the acknowledgements by
+demand (the one for event N goes out when the consumer asks for N+1), and
+halting early, an exception in the consumer, or the consumer's death all
+end the turn and free the port. The events are validated on the Elixir
+side against the emitter's declared type exactly as replies are.
+
+What this deliberately is not: `ask` callbacks (Bend cannot take an
+arbitrary typed answer back, only `Bool`), several requests in flight,
+and events under the NIF transport, which has no such channel and refuses
+an effectful export at build time. `demos/raytrace/`'s `fly` is the
+worked example: one call, a whole camera turn, a frame per event.
 
 ## 6. A real port, to learn what is missing
 Pick code that is pure, terminating and numeric or string shaped, with a

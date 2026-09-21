@@ -33,6 +33,9 @@ What the demo is meant to show:
 - **Bytes out**: 0.88 MiB of pixels in one buffer, not a list cell per byte
 - **parallel tiles**: `render_tiles/4` forks the tiles, and every tile
   forks its rows as a balanced tree, so one call uses every core
+- **events out of Bend**: `fly/5` renders a whole camera turn in one call
+  and each frame arrives in Elixir as Bend finishes it, acknowledged one
+  at a time, assembled into an animated PNG while the render still runs
 - **Elixir owns scheduling and cancellation**: Elixir cuts the tiles,
   sizes the batches, streams the rows out as they arrive, and bounds the
   call with `:timeout` — past the deadline the call raises
@@ -78,6 +81,64 @@ writes the result through `lib/png.ex`, forty lines of `:zlib` over
 truecolour scanlines. `render_checked/7` answers a `Result`, so a tile
 outside the image comes back as `{:error, "tile out of the image, or
 empty"}` rather than an exception.
+
+## The fly-through
+
+![48 frames of one camera turn](raytrace_flythrough.png)
+
+*(An animated PNG: a browser plays it, a still viewer shows frame 0.)*
+
+`fly/5` is one call that renders many frames. It uses the library's
+[typed event channel](../../docs/TYPES.md): a `~emit: B.Bytes -> IO(Bool)`
+parameter, which the shim fills with a lambda over `Bendler.emit`.
+
+```python
+def fly(~emit: B.Bytes -> IO(Bool), +scene: Scene, +w: U32, +h: U32,
+        +frames: U32, +cx: F32, +cz: F32) -> IO(U32):
+```
+
+Each turn of the loop renders a frame with the ordinary `render_tile`
+machinery (the whole image as one tile, whose rows fork as a balanced
+tree), emits its bytes, and stops early if the emit answers `False`. It
+answers how many frames it emitted.
+
+The camera "orbit" is the world turning: the tracer's camera is
+upstream's, fixed at `eye` and looking down `+z` with no orientation
+parameter, so `fly` rotates every sphere centre **and the light**
+together about the vertical axis through `(cx, cz)`. Rotating both is
+exactly a camera orbiting a world whose light stays put: the geometry
+between spheres and light is untouched, so only the view moves. Frame 0
+is the unrotated scene, and is bit-for-bit what `render/4` draws.
+
+```elixir
+{:ok, _} = Supervisor.start_link([RaytracePort], strategy: :one_for_one)
+scene = RaytracePort.default_scene()
+
+# 48 frames of one turn, written as they arrive
+48 = RaytracePort.save_apng("turn.png", scene, 320, 240, 48)
+
+# or take the frames yourself; halting cancels the rest of the turn
+RaytracePort.fly(scene, 320, 240, 10_000)
+|> Stream.each(fn
+  {:event, rgb} -> display(rgb)
+  {:done, n} -> IO.puts("#{n} frames")
+end)
+|> Stream.run()
+```
+
+The APNG writer (`Bendler.Demos.Raytrace.Apng`) appends each frame to the
+open file as it arrives: `acTL` up front, then an `fcTL` and an `IDAT` or
+`fdAT` per frame, `IEND` at the end, and a corrected `acTL` count if the
+turn was cancelled. Every frame is a full-size lossless truecolour image
+over the existing `Png` zlib path — no palette, no quantisation — so the
+file grows on disk while the render is still running and any browser
+opens it.
+
+Backpressure is the acknowledgement. The worker renders frame N+1 only
+once this stream has been asked for it, so a slow consumer (a display, a
+socket) simply slows the render instead of queueing frames. `Enum.take/2`
+ends the turn: the next emit is answered `False`, `fly` returns the
+reduced count, and the port serves the next call.
 
 ## Numbers
 
@@ -133,6 +194,38 @@ Mandelbrot demo's 7.5x, and the paragraph above says why: the serial
 tail (the byte list, the pack, the transfer) does not shrink with more
 workers.
 
+### The fly-through
+
+Same machine, 12 threads, 320x240, 24 frames, five warm samples:
+
+| | median | min | max |
+|---|---:|---:|---:|
+| time to first frame | 6.68 ms | 6.33 | 7.64 |
+| per-frame latency | 6.91 ms | 6.20 | 7.82 |
+| 24 frames in **one** `fly` call | 202.8 ms | 190.1 | 206.6 |
+| 24 **separate** `render_tile` calls | 234.6 ms | 214.9 | 306.8 |
+| cancel (3rd frame) to the next call answered | 0.358 ms | 0.325 | 0.442 |
+| `save_apng` of 24 frames (render + deflate + write) | 334.2 ms | 291.0 | 377.0 |
+
+The acknowledgement round trip does not cost anything here: 8.45 ms per
+frame inside one call against 9.78 ms per separate call, because the
+scene is encoded, validated and converted once instead of 24 times. The
+event channel is therefore *cheaper* than a call per frame as well as
+being incremental. Cancellation is sub-millisecond end to end: the
+0.358 ms above covers the refusal reaching the worker, `fly` returning,
+its reply crossing, and a small unrelated call being served afterwards.
+
+The committed `raytrace_flythrough.png` (48 frames, 320x240, 1.24 MB) is
+about 500 ms end to end, 10 ms a frame including deflate.
+
+GPU lane, 24 frames with `gpu: :on`, one bang per frame, at 128x96:
+CPU 57.3 ms against **GPU 3351.9 ms**, the same 50x-ish loss the single
+image section below records for this kernel. A whole 320x240 frame in one
+bang is more than macOS will let a single Metal command buffer hold: it
+aborts with `kIOGPUCommandBufferCallbackErrorImpactingInteractivity` and
+the worker exits 1, which is why the benchmark measures the GPU lane at
+128x96 and the gated test at 64x48.
+
 ## F32 against doubles
 
 `RaytraceReference` is the same algorithm in Elixir doubles, step for
@@ -175,7 +268,13 @@ comparison against doubles is fuzzy.
   `bendler: stdout write failed` line the deadline tests print. That is
   the library's documented cancellation limit, not this demo's.
 - The PNG writer is 8-bit truecolour with filter 0 only. It is not a PNG
-  library.
+  library. The APNG writer adds `acTL`/`fcTL`/`fdAT` over it: full-size
+  frames, no dispose or blend modes, no inter-frame delta.
+- The fly-through turns the world, not the camera, because the tracer has
+  no camera orientation. It is a turntable about a vertical axis through
+  `(cx, cz)`; there is no tilt, dolly or field of view.
+- An event costs a pipe round trip, so `fly` emits whole frames. Emitting
+  per tile or per row would spend more on acknowledgements than on rays.
 
 ## What the port taught
 
