@@ -1,5 +1,9 @@
 # Small CSV parser
 
+For the single-call, callback-driven variant that keeps rows and aggregation
+inside Bend, see [Ask-driven CSV aggregation](ASK.md). The host-driven streaming
+parser below remains available on both Port and experimental NIF.
+
 An original Bend implementation of a useful subset of
 [NimbleCSV](https://github.com/dashbitco/nimble_csv)'s eager byte-oriented
 parsing semantics. NimbleCSV 1.3.0 is pinned as a test-only dependency and
@@ -150,8 +154,9 @@ offsets do not. Transport errors remain `Bendler.Error`.
 ### Demand, cancellation and limitations
 
 This is **host-driven incremental parsing**, not a long-running Bend `IO`
-export with `ask`/`emit`. The new work does not implement general BEAM effects
-or change the native transport. Each ordinary typed call returns a bounded
+export with `ask`/`emit`. This incremental API does not use BEAM effects
+or change the native transport (see [ASK.md](ASK.md) for the callback variant).
+Each ordinary typed call returns a bounded
 row batch and an opaque cursor containing partial field/row buffers. The
 Elixir enumeration owns that cursor; neither backend holds a parser session.
 

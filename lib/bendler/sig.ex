@@ -17,6 +17,11 @@ defmodule Bendler.Sig do
 
   ## Effectful exports and emitters
 
+  A callback named `ask`, written `~ask: Request -> IO(Response)`, is a
+  typed host callback instead of an emitter. Its generated Elixir function
+  takes a final unary handler argument. This first version supports one
+  callback channel per export (ask or emit, not both), on Port only.
+
   A def whose result is `IO(T)`, `T` marshalled, is exported too: the shim
   binds the result in its `do` block and replies with it. Such a def may
   take one **emitter** parameter, whose type is `T -> IO(Bool)`. An emitter
@@ -76,7 +81,13 @@ defmodule Bendler.Sig do
   is what a def emitting more than once needs, since a function type is
   Type-kinded and a closure can therefore never be reusable).
   """
-  @type emitter :: %{name: String.t(), type: type, text: String.t(), template: boolean}
+  @type emitter :: %{
+          required(:name) => String.t(),
+          required(:type) => type,
+          required(:text) => String.t(),
+          required(:template) => boolean,
+          optional(:reply) => {type, String.t()}
+        }
   @type t :: %__MODULE__{
           name: String.t(),
           params: [param],
@@ -194,7 +205,13 @@ defmodule Bendler.Sig do
   # `a.b` and `a_b` would both become a_b/1 in Elixir
   defp check_collisions({sigs, bad}) do
     sigs
-    |> Enum.group_by(&{String.replace(&1.name, ".", "_"), length(&1.params)})
+    |> Enum.flat_map(fn sig ->
+      name = String.replace(sig.name, ".", "_")
+      ask = sig.emitter && Map.has_key?(sig.emitter, :reply)
+      names = if sig.emitter && !ask, do: [name, name <> "_stream"], else: [name]
+      Enum.map(names, &{{&1, length(sig.params) + if(ask, do: 1, else: 0)}, sig})
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
     |> Enum.each(fn
       {_, [_]} ->
         :ok
@@ -286,11 +303,26 @@ defmodule Bendler.Sig do
 
   # `emit: T -> IO(Bool)` (or `~emit:`, the template form) is the emitter;
   # everything else is an ordinary wire parameter.
+  defp one_param("ask", quantifier, text, ctx) do
+    case Regex.run(~r/^(.+?)\s*->\s*IO\s*\((.+)\)$/s, text) do
+      [_, input, output] -> ask_param("ask", quantifier, input, output, ctx)
+      nil -> typed_param("ask", quantifier == "+", text, ctx)
+    end
+  end
+
   defp one_param(name, quantifier, text, ctx) do
     case Regex.run(@emitter_re, text) do
       [_, event] -> emitter_param(name, quantifier, String.trim(event), ctx)
       nil when quantifier == "~" -> {:error, "template parameter #{name}"}
       nil -> typed_param(name, quantifier == "+", text, ctx)
+    end
+  end
+
+  defp ask_param(name, quantifier, input, output, ctx) do
+    with {:ok, param} <- emitter_param(name, quantifier, String.trim(input), ctx),
+         {:ok, type} <- parse_type(String.trim(output), ctx),
+         :ok <- map_holds_no_data(type) do
+      {:ok, Map.put(param, :reply, {type, String.trim(output)})}
     end
   end
 

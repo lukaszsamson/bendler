@@ -4,6 +4,11 @@
 
 Public repository: [github.com/lukaszsamson/bendler](https://github.com/lukaszsamson/bendler)
 
+New Port demo: [ask-driven CSV aggregation](https://github.com/lukaszsamson/bendler/blob/main/demos/csv/ASK.md). A typed
+`~ask: Request -> IO(Response)` callback pulls host-owned input while parser
+state and rows stay in Bend. Its generated Elixir function takes a final
+unary handler argument. Ask and emit cannot yet be combined in one export.
+
 Call [Bend](https://www.bend-lang.org/) code from Elixir, the way Rustler calls
 Rust and Zigler calls Zig. A Bend file becomes an Elixir module: every
 exportable def is a function, and the Bend program runs either as a NIF

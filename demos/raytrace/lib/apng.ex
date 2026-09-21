@@ -17,7 +17,7 @@ defmodule Bendler.Demos.Raytrace.Apng do
   alias Bendler.Demos.Raytrace.Png
 
   @enforce_keys [:io, :w, :h, :announced, :delay]
-  defstruct [:io, :w, :h, :announced, :delay, frames: 0, seq: 0]
+  defstruct [:io, :w, :h, :announced, :delay, plays: 0, frames: 0, seq: 0]
 
   @typedoc "A writer in progress."
   @opaque t :: %__MODULE__{}
@@ -50,6 +50,7 @@ defmodule Bendler.Demos.Raytrace.Apng do
       w: w,
       h: h,
       announced: announced,
+      plays: plays,
       delay: Keyword.get(opts, :delay, {1, 20})
     }
   end
@@ -85,7 +86,7 @@ defmodule Bendler.Demos.Raytrace.Apng do
 
   # acTL is at a fixed offset: its payload and CRC are rewritten in place
   defp fix_count(a) do
-    payload = <<a.frames::32, 0::32>>
+    payload = <<a.frames::32, a.plays::32>>
     :ok = :file.pwrite(a.io, @actl_offset, payload <> <<:erlang.crc32("acTL" <> payload)::32>>)
   end
 

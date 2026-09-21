@@ -28,6 +28,14 @@ defmodule Bendler.Port do
   finishes early. The owner never blocks on a consumer: an outstanding
   acknowledgement is just state, and the total deadline keeps running.
 
+  ASK frames (17) run the per-call handler in a linked, monitored process,
+  outside this owner. The handler has a 5-second deadline; the total request
+  deadline still applies. Exceptions, invalid results, timeout or caller
+  death stop this owner and its worker, so a supervisor can replace them.
+  A typed Result error is an ordinary response and does not stop the worker.
+  Direct same-worker reentry is rejected. Indirect cycles through other
+  processes are not detected and must be bounded by deadlines.
+
   A native launcher owns the worker process group. Closing the port (also
   when this owner is killed) makes the launcher send TERM, then KILL after
   200 ms, and reap the worker. This does not depend on worker cooperation.
@@ -47,6 +55,8 @@ defmodule Bendler.Port do
   @doc "Sends a request frame and waits for the reply frame, or an error tuple."
   @spec call(GenServer.server(), binary) :: binary | {:error, :busy | :timeout | :exited}
   def call(server, frame) do
+    reject_reentry!(server)
+
     case GenServer.call(server, {:call, frame}, :infinity) do
       {:bendler_reply, reply, measurements} ->
         Bendler.Telemetry.record(measurements)
@@ -59,6 +69,34 @@ defmodule Bendler.Port do
     :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
   end
 
+  @doc "Calls an ask export with a callback returning an encoded, validated value."
+  @spec ask_call(GenServer.server(), binary, (binary -> binary)) :: binary | {:error, atom}
+  def ask_call(server, frame, callback) do
+    reject_reentry!(server)
+
+    case GenServer.call(server, {:ask_call, frame, callback}, :infinity) do
+      {:bendler_reply, reply, measurements} ->
+        Bendler.Telemetry.record(measurements)
+        reply
+
+      reply ->
+        reply
+    end
+  catch
+    :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
+  end
+
+  defp reject_reentry!(server) do
+    owner = if is_pid(server), do: server, else: GenServer.whereis(server)
+
+    if owner != nil and Process.get({__MODULE__, :callback_owner}) == owner,
+      do:
+        raise(Bendler.Error,
+          message: "callback cannot call its occupied worker",
+          reason: :reentrant
+        )
+  end
+
   @doc """
   Admits a request whose events the caller subscribes to. Answers
   `{:ok, ref}` at once; the caller then receives `{:bendler_event, ref,
@@ -67,6 +105,7 @@ defmodule Bendler.Port do
   """
   @spec stream(GenServer.server(), binary) :: {:ok, reference} | {:error, :busy | :exited}
   def stream(server, frame) do
+    reject_reentry!(server)
     GenServer.call(server, {:stream, frame}, :infinity)
   catch
     :exit, {_reason, {GenServer, :call, _}} -> {:error, :exited}
@@ -133,19 +172,27 @@ defmodule Bendler.Port do
 
   def handle_call({:call, frame}, from, s), do: admit(frame, from, :call, s)
 
+  def handle_call({:ask_call, _, _}, _from, %{queued: n, max_queue: max, inflight: req} = s)
+      when req != nil and n >= max, do: {:reply, {:error, :busy}, s}
+
+  def handle_call({:ask_call, frame, callback}, from, s),
+    do: admit(frame, from, :call, s, callback)
+
   def handle_call({:stream, frame}, {pid, _} = from, s) do
     ref = make_ref()
     GenServer.reply(from, {:ok, ref})
     admit(frame, from, {:stream, pid, ref}, s)
   end
 
-  defp admit(frame, {pid, _} = from, reply_to, s) do
+  defp admit(frame, {pid, _} = from, reply_to, s, callback \\ nil) do
     req = %{
       frame: frame,
       from: from,
       reply_to: reply_to,
       subscriber: :live,
       awaiting: nil,
+      callback: callback,
+      handler: nil,
       monitor: Process.monitor(pid),
       admitted: System.monotonic_time(),
       dispatched: nil,
@@ -200,6 +247,7 @@ defmodule Bendler.Port do
   end
 
   defp finish(req, reply) do
+    stop_handler(req.handler)
     _ = cancel(req.timer)
     _ = Process.demonitor(req.monitor, [:flush])
     now = System.monotonic_time()
@@ -220,6 +268,60 @@ defmodule Bendler.Port do
   # 16 leads an EVENT frame; no reply value tag reaches it, so the two
   # frame kinds are told apart by their first byte alone.
   @impl true
+  def handle_info({port, {:data, <<17, body::binary>>}}, %{port: port, inflight: req} = s)
+      when req != nil do
+    if is_function(req.callback, 1) and req.handler == nil do
+      owner = self()
+
+      {pid, mon} =
+        :erlang.spawn_opt(
+          fn ->
+            Process.put({__MODULE__, :callback_owner}, owner)
+
+            result =
+              try do
+                {:ok, req.callback.(body)}
+              catch
+                _, _ -> {:error, :callback}
+              end
+
+            send(owner, {:callback_answer, self(), result})
+          end,
+          [:link, :monitor]
+        )
+
+      timer = Process.send_after(self(), {:callback_timeout, pid}, 5_000)
+      {:noreply, %{s | inflight: %{req | handler: {pid, mon, timer}}}}
+    else
+      callback_failed(s)
+    end
+  end
+
+  def handle_info(
+        {:callback_answer, pid, {:ok, frame}},
+        %{inflight: %{handler: {pid, _, _}} = req} = s
+      ) do
+    stop_handler(req.handler)
+    s = %{s | inflight: %{req | handler: nil}}
+
+    case send_frame(s.port, frame) do
+      :ok -> {:noreply, s}
+      _ -> callback_failed(s)
+    end
+  end
+
+  def handle_info({:callback_answer, pid, _}, %{inflight: %{handler: {pid, _, _}}} = s),
+    do: callback_failed(s)
+
+  def handle_info({:callback_timeout, pid}, %{inflight: %{handler: {pid, _, _}}} = s),
+    do: callback_failed(s)
+
+  def handle_info({:callback_answer, _, _}, s), do: {:noreply, s}
+  def handle_info({:callback_timeout, _}, s), do: {:noreply, s}
+
+  def handle_info({:DOWN, mon, :process, _, _}, %{inflight: %{handler: {_, mon, _}}} = s),
+    do: callback_failed(s)
+
   def handle_info({port, {:data, <<16, event::binary>>}}, %{port: port, inflight: req} = s)
       when req != nil do
     case {req.reply_to, req.subscriber} do
@@ -263,9 +365,13 @@ defmodule Bendler.Port do
     # complete to keep frames aligned)
     gone = %{req | subscriber: :gone, awaiting: nil}
 
-    if req.awaiting,
-      do: answer(false, %{s | inflight: gone}),
-      else: {:noreply, %{s | inflight: gone}}
+    if req.callback do
+      callback_failed(s)
+    else
+      if req.awaiting,
+        do: answer(false, %{s | inflight: gone}),
+        else: {:noreply, %{s | inflight: gone}}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, _, _}, s) do
@@ -281,6 +387,9 @@ defmodule Bendler.Port do
     {:stop, {:shutdown, {:exit_status, code}}, s}
   end
 
+  # GenServer handles its parent's exit; our other linked processes are
+  # callback workers. Their monitored DOWN (or answer) owns completion.
+  def handle_info({:EXIT, pid, _}, s) when is_pid(pid), do: {:noreply, s}
   def handle_info({:EXIT, _, reason}, s), do: {:stop, reason, s}
 
   # The one-byte acknowledgement frame the worker is parked on. Unlike a
@@ -300,6 +409,20 @@ defmodule Bendler.Port do
 
   defp cancel(nil), do: :ok
   defp cancel(timer), do: _ = Process.cancel_timer(timer)
+
+  defp stop_handler(nil), do: :ok
+
+  defp stop_handler({pid, mon, timer}) do
+    _ = Process.cancel_timer(timer)
+    Process.demonitor(mon, [:flush])
+    Process.exit(pid, :kill)
+    :ok
+  end
+
+  defp callback_failed(s) do
+    finish(s.inflight, {:error, :callback})
+    {:stop, {:shutdown, :callback}, %{s | inflight: nil}}
+  end
 
   defp split(queue, pred) do
     {yes, no} = queue |> :queue.to_list() |> Enum.split_with(pred)

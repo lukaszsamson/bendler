@@ -19,6 +19,10 @@ defmodule Bendler.Codec do
   The host answers every event with a one-byte acknowledgement frame
   (1 go on, 0 the consumer is gone), which is what bounds the worker.
 
+  17 leads an ASK frame carrying one typed request value. Its response is
+  a length-prefixed encoded value of the declared callback response type.
+  Only one callback is outstanding; no function names or pids cross the wire.
+
   A Result's Fail is returned as `{:error, value}`; only tag 0 raises a
   transport error. Type expressions may nest up to 32 levels; values up to 2048.
 
@@ -463,7 +467,7 @@ defmodule Bendler.Codec do
 end
 
 defmodule Bendler.Error do
-  @moduledoc "Raised by a generated function: `reason` is `:busy`, `:timeout`, `:dead`, `:exited`, `:refused`, `:nomem` or `:build`."
+  @moduledoc "Raised by a generated function: transport/build reasons, `:callback` for failed handlers, or `:reentrant` for same-worker callback reentry."
   defexception [:message, reason: :build]
 
   @impl true

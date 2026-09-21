@@ -278,6 +278,16 @@ defmodule Bendler.Demos.RaytraceTest do
     assert RaytracePort.upstream_checksum(3, 40) == 19_281
   end
 
+  test "correcting an APNG frame count preserves its repeat count" do
+    path = Path.join(System.tmp_dir!(), "bendler_plays_#{System.unique_integer([:positive])}.png")
+    on_exit(fn -> File.rm(path) end)
+    writer = Apng.open(path, 1, 1, frames: 3, plays: 7)
+    assert writer |> Apng.frame(<<0, 0, 0>>) |> Apng.close() == 1
+
+    assert {"acTL", <<1::32, 7::32>>} =
+             path |> File.read!() |> Apng.chunks() |> List.keyfind("acTL", 0)
+  end
+
   @tag skip:
          if(@gpu_available,
            do: false,

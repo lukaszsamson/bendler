@@ -127,9 +127,9 @@ Outside the MVP promise; `BEAM_API.md` has the API specifics.
 GPU-shaped kernels (the lane itself builds and runs through a port; the
 ray tracer demo shows why a scene-as-list kernel does not gain from it),
 the direct-call compiler patch (the real NIF speed-up; upstream
-WONTFIX #813 is the hook), an inline `~B` sigil, `ask`-shaped callbacks
-(an effect that takes an answer *of a chosen type* back from the BEAM,
-rather than the Bool an emit gets), events under the NIF transport, and
+WONTFIX #813 is the hook), an inline `~B` sigil, combined ask/emit exports,
+multiple callback handlers, configurable callback deadlines, events and
+callbacks under the NIF transport, and
 more than one request in flight (`IO.fork` alone is not enough while the
 codec's cursor is global).
 
@@ -152,11 +152,30 @@ halting early, an exception in the consumer, or the consumer's death all
 end the turn and free the port. The events are validated on the Elixir
 side against the emitter's declared type exactly as replies are.
 
-What this deliberately is not: `ask` callbacks (Bend cannot take an
-arbitrary typed answer back, only `Bool`), several requests in flight,
+What the emit channel deliberately is not: arbitrary typed callback replies
+(those now use the separate ask channel below), several requests in flight,
 and events under the NIF transport, which has no such channel and refuses
 an effectful export at build time. `demos/raytrace/`'s `fly` is the
 worked example: one call, a whole camera turn, a frame per event.
+
+## 5c. Done: typed Port ask callbacks and native-owned CSV aggregation
+
+- [x] `~ask: Request -> IO(Response)` with an explicit per-call Elixir handler.
+- [x] One outstanding ASK frame (17), reply codec budgets, and native validation
+      before allocation. Existing Base/composite conversions are reused.
+- [x] Handler runs outside the owner, linked and monitored, with a five-second
+      handler deadline plus the existing total request deadline.
+- [x] Typed errors preserve the worker; handler failure, invalid return, timeout
+      or caller death stop the occupied worker for supervised replacement.
+- [x] Direct same-worker reentry rejection; indirect cycles remain deadline-bound.
+- [x] CSV demo: one invocation pulls bounded chunks, retains parser state and
+      rows, and returns aggregate counts. Differential tests, an ASan probe and
+      a three-way benchmark are in `demos/csv/ASK.md`.
+
+This first version uses the reserved callback name `ask` and permits one
+callback channel per export: ask or emit, not both. NIF support and concurrent
+requests remain deferred. The next callback demo could be batched graph search
+over host-owned data; CSV validates the mechanics with an existing oracle.
 
 ## 6. A real port, to learn what is missing
 Pick code that is pure, terminating and numeric or string shaped, with a
@@ -223,7 +242,7 @@ small interface, and where Bend's parallelism can show. In order:
    A separate bounded streaming API now resumes the parser across arbitrary
    chunks on Port and experimental NIF. Its cursor crosses as Base tuples and
    byte buffers; Elixir demand controls reads and calls. This is not the
-   deferred `ask`/`emit` effect protocol. See the CSV README for limits,
+   separate `ask`/`emit` effect protocol. See the CSV README for limits,
    cancellation semantics and the streaming benchmark.
 
 7. **A raytracer whose scene is a user datatype** (done: `demos/raytrace/`;

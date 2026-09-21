@@ -25,6 +25,40 @@ defmodule Bendler.EventsTest do
     assert EventsPort.double(21) == 42
   end
 
+  test "halting after owner replacement monitors the original owner" do
+    {_, cont} = step(EventsPort.count_stream(10))
+    old = Process.whereis(EventsPort)
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, _}
+    # A supervisor restart need not have happened yet: deliberately ensure
+    # the name is now bound to a different owner before releasing.
+    wait_replacement(old, 100)
+    assert {:halted, nil} = stop(cont)
+    assert EventsPort.double(4) == 8
+  end
+
+  defp wait_replacement(_, 0), do: flunk("owner did not restart")
+
+  defp wait_replacement(old, n) do
+    case Process.whereis(EventsPort) do
+      pid when is_pid(pid) and pid != old ->
+        :ok
+
+      _ ->
+        Process.sleep(10)
+        wait_replacement(old, n - 1)
+    end
+  end
+
+  test "generated stream names cannot shadow exports" do
+    assert_raise Bendler.Error, ~r/foo_stream/, fn ->
+      Bendler.Sig.parse(
+        "def foo(~emit: U32 -> IO(Bool), n: U32) -> IO(U32):\n  x\ndef foo_stream(n: U32) -> U32:\n  n"
+      )
+    end
+  end
+
   test "an effectful export with no events is an ordinary call" do
     assert EventsPort.tick(41) == 42
   end

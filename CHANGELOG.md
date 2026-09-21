@@ -4,10 +4,18 @@
 
 This release is not published yet. The current tree includes:
 
+- Typed, per-call Port `ask` callbacks (tag 17), bounded off-owner handler
+  execution, reply validation, same-worker direct reentry rejection and
+  supervised failure recovery. CSV aggregation demonstrates native-owned
+  input demand without transferring rows back to Elixir.
+- Fix stream cleanup after owner replacement by retaining the original PID
+  and monitor; reject generated `_stream` name collisions; preserve APNG
+  repeat counts when correcting the number of frames after cancellation.
+
 - Lazy streaming CSV demo over Port and experimental NIF, with arbitrary
   binary chunks, bounded records/batches, caller-owned cursors, differential
   tests and a NimbleCSV streaming benchmark. This uses incremental calls;
-  general BEAM `ask`/`emit` effects remain deferred.
+  Port `ask`/`emit` effects are separate features described below.
 - A supervised CPU port backend for bounded pure Bend functions, with generated
   Elixir bindings, typed codecs, bounded admission, deadlines, telemetry, and
   launcher-owned worker termination.

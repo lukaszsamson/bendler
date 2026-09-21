@@ -57,6 +57,12 @@ defmodule Bendler do
   rejected the frame). Arguments are checked before encoding and raise
   `ArgumentError`.
 
+  A Port export with `~ask: Request -> IO(Response)` takes a final unary
+  Elixir handler. Handler failure raises `:callback`; direct same-worker
+  callback reentry raises `:reentrant`. One callback channel per export:
+  ask or emit, not both. Handlers run in fresh processes with five-second
+  deadlines; the total request deadline remains active.
+
   The build runs when the module compiles if the project does not list the
   `:bendler` Mix compiler; with `compilers: Mix.compilers() ++ [:bendler]`
   the module only records a build request and `mix compile.bendler` builds
@@ -237,7 +243,8 @@ defmodule Bendler do
     raise Bendler.Error, message: "#{fun}: the request was refused: #{why}", reason: :refused
   end
 
-  def result({:error, reason}, fun) when reason in [:busy, :timeout, :exited, :nomem, :dead] do
+  def result({:error, reason}, fun)
+      when reason in [:busy, :timeout, :exited, :nomem, :dead, :callback, :reentrant] do
     raise Bendler.Error, message: "#{fun}: #{reason}", reason: reason
   end
 
@@ -256,6 +263,24 @@ defmodule Bendler do
   end
 
   @doc false
+  def invoke_ask(module, fun, {index, pairs, codec, return_type}, handler, input, output)
+      when is_function(handler, 1) do
+    Bendler.Telemetry.span(module, fun, :port, fn ->
+      frame = Bendler.Codec.request(index, pairs, codec)
+
+      callback = fn body ->
+        value = body |> Bendler.Codec.event(input, fun, codec) |> handler.()
+        # request/3 applies the same encoded/decoded allocation budgets as arguments.
+        <<_::32, encoded::binary>> = Bendler.Codec.request(0, [{value, output}], codec)
+        encoded
+      end
+
+      reply = Bendler.Port.ask_call(module, frame, callback)
+      Bendler.Codec.check(result(reply, fun), return_type, fun, codec)
+    end)
+  end
+
+  @doc false
   @spec stream(module(), atom(), tuple()) :: Enumerable.t()
   def stream(module, fun, {index, pairs, codec, return_type, event_type}) do
     Stream.resource(
@@ -269,18 +294,24 @@ defmodule Bendler do
     span = Bendler.Telemetry.open(module, fun, :port)
     frame = Bendler.Codec.request(index, pairs, codec)
 
-    case Bendler.Port.stream(module, frame) do
+    owner =
+      Process.whereis(module) || raise(Bendler.Error, message: "#{fun}: exited", reason: :exited)
+
+    monitor = Process.monitor(owner)
+
+    case Bendler.Port.stream(owner, frame) do
       {:ok, ref} ->
         %{
-          module: module,
+          module: owner,
           ref: ref,
           span: span,
-          monitor: Process.monitor(module),
+          monitor: monitor,
           owed: false,
           done: false
         }
 
       {:error, reason} ->
+        Process.demonitor(monitor, [:flush])
         Bendler.Telemetry.close_exception(span, :error, reason)
         raise Bendler.Error, message: "#{fun}: #{reason}", reason: reason
     end
@@ -333,14 +364,12 @@ defmodule Bendler do
   # event, then waits for the def to answer, so the port serves the next
   # call as soon as this one returns.
   defp release_stream(st) do
-    _ = Process.demonitor(st.monitor, [:flush])
-
     unless Process.delete(over(st.ref)) do
       Bendler.Port.ack(st.module, st.ref, false)
-      mon = Process.monitor(st.module)
-      drain_stream(st, mon)
-      _ = Process.demonitor(mon, [:flush])
+      drain_stream(st, st.monitor)
     end
+
+    _ = Process.demonitor(st.monitor, [:flush])
 
     :ok
   end
@@ -384,27 +413,56 @@ defmodule Bendler do
     pairs = Enum.zip(vars, Enum.map(params, & &1.type))
     types = Enum.map(params, &Bendler.Sig.typespec(&1.type))
     ret_spec = Bendler.Sig.typespec(ret_t)
+    handler = Macro.unique_var(:ask_handler, __MODULE__)
+    ask = sig.emitter && Map.get(sig.emitter, :reply)
+    call_vars = if ask, do: vars ++ [handler], else: vars
+
+    call_types =
+      if ask do
+        input_spec = Bendler.Sig.typespec(sig.emitter.type)
+        output_spec = Bendler.Sig.typespec(elem(ask, 0))
+        types ++ [quote(do: (unquote(input_spec) -> unquote(output_spec)))]
+      else
+        types
+      end
 
     sig_text =
       "def #{name}(#{Enum.map_join(params, ", ", &"#{if &1.reusable, do: "+", else: ""}#{&1.name}: #{&1.text}")}) -> #{ret_text}"
 
     args = Enum.map(pairs, fn {v, t} -> quote(do: {unquote(v), unquote(Macro.escape(t))}) end)
 
-    call =
-      quote do
-        @doc "Bend: `#{unquote(sig_text)}`#{unquote(doc_tail(sig))} (line #{unquote(sig.line)})."
-        @spec unquote(fname)(unquote_splicing(types)) :: unquote(ret_spec)
-        def unquote(fname)(unquote_splicing(vars)) do
-          deadline = __bendler_deadline__()
-
+    invocation =
+      if ask do
+        quote do
+          Bendler.invoke_ask(
+            __MODULE__,
+            unquote(fname),
+            {unquote(index), unquote(args), unquote(Macro.escape(codec)),
+             unquote(Macro.escape(ret_t))},
+            unquote(handler),
+            unquote(Macro.escape(sig.emitter.type)),
+            unquote(Macro.escape(elem(ask, 0)))
+          )
+        end
+      else
+        quote do
           Bendler.invoke(
             __MODULE__,
             unquote(fname),
             unquote(backend),
-            deadline,
+            __bendler_deadline__(),
             {unquote(index), unquote(args), unquote(Macro.escape(codec)),
              unquote(Macro.escape(ret_t))}
           )
+        end
+      end
+
+    call =
+      quote do
+        @doc "Bend: `#{unquote(sig_text)}`#{unquote(doc_tail(sig))} (line #{unquote(sig.line)})."
+        @spec unquote(fname)(unquote_splicing(call_types)) :: unquote(ret_spec)
+        def unquote(fname)(unquote_splicing(call_vars)) do
+          unquote(invocation)
         end
       end
 
@@ -425,12 +483,16 @@ defmodule Bendler do
 
   defp doc_tail(%Bendler.Sig{emitter: nil}), do: ""
 
+  defp doc_tail(%Bendler.Sig{emitter: %{reply: _}}),
+    do: ", with a final unary Elixir callback argument (Port only; 5-second handler deadline)"
+
   defp doc_tail(%Bendler.Sig{emitter: e}),
     do:
       ", whose events are discarded: the first `#{e.name}` is answered `False`, " <>
         "so the def stops early. Use the `_stream` function to receive them"
 
   defp stream_fun(%Bendler.Sig{emitter: nil}, _ctx), do: []
+  defp stream_fun(%Bendler.Sig{emitter: %{reply: _}}, _ctx), do: []
 
   defp stream_fun(%Bendler.Sig{emitter: e}, ctx) do
     %{vars: vars, args: args, codec: codec, ret_spec: ret_spec, types: types} = ctx

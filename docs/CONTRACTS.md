@@ -168,7 +168,39 @@ raw submit/cancel functions are not a supported public async API; callers of
 that plumbing must explicitly cancel on deadline. There is no native timer
 thread interrupting a running computation.
 
-## Sanitizer note
+## Ask callbacks (Port only)
+
+An ask export has a parameter named `ask` of type `Request -> IO(Response)`;
+use a Bend template (`~ask`) for repeated calls. Its generated Elixir function
+takes a final unary callback. The callback is selected by the caller, not by
+a Bend-supplied function name or PID. One channel per export, ask or emit.
+
+Worker-to-host ASK frames start with 17 followed by a codec value of Request.
+The host answers with a normal length-prefixed codec value of Response. The
+worker is parked while awaiting it. Both endpoints validate response types;
+the C check includes depth, item, byte and decoded-allocation budgets before
+decoding. The original request cursor is retained and restored around replies.
+
+The handler runs in a fresh linked/monitored process, not the Port owner or
+caller. It has a fixed 5-second deadline; the request's total deadline remains
+active. Handler exceptions, wrong response types and handler timeout fail with
+`:callback`, close the owner/worker and let a supervisor restart it. No automatic
+retries. Total request timeout is `:timeout`; owner death is `:exited`. Caller
+death also closes its occupied worker. A typed `Result.Fail` is normal data and
+does not trigger replacement. Queued requests fail on owner replacement as usual.
+
+Direct same-worker reentry from the handler raises `:reentrant`; indirection
+through another process is not detected. Callbacks are trusted host code, not
+a sandbox: spawned descendants and external side effects are their responsibility.
+Handlers must not use raw file handles owned by another process. One request
+remains in flight for the entire callback-driven computation.
+
+Event cancellation remains cooperative: false only requests that the def stop.
+Use a finite total deadline if cleanup must be bounded even for a def that
+ignores cancellation. Streams now retain their original owner PID/monitor;
+supervisor replacement cannot retarget a pending stream to the new owner.
+
+## Sanitizer execution
 
 `demos/csv/check_asan.exs` builds a separate ASan-instrumented port executable
 from generated C. It preserves instrumentation everywhere. Only the ASan copy

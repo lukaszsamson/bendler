@@ -227,3 +227,19 @@ cooperative, and a def that ignores it simply keeps being told `False`.
 Events are a port feature. The NIF transport carries requests and replies
 only, so an `IO(T)` export is skipped under `backend: :nif`, and named in
 a build error when `exports:` asks for it.
+
+## Typed ask callbacks (Port only)
+
+A function parameter specifically named `ask` with type
+`~ask: Request -> IO(Response)` is a host callback. The generated Elixir
+function has one additional, final argument, a unary handler with the
+corresponding Request-to-Response typespec. Its input and result use the
+existing codec types and generated datatype converters. A `Maybe` EOF and
+a `Result` application error are ordinary typed responses, not transport errors.
+
+One ASK frame (tag 17 plus an encoded Request) is outstanding at a time.
+The response is a length-prefixed encoded Response, checked in Elixir and
+again by the C validator before decoding. It is not an event acknowledgement.
+An export may have one callback channel: ask or emit, not both. NIF refuses
+these effectful exports. See CONTRACTS.md for handler lifetime, deadlines
+and failures, and `demos/csv/ASK.md` for a working chunk-reader contract.

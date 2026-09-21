@@ -130,6 +130,24 @@ defmodule Bendler.Gen do
   # never be reusable).
   defp with_emitter(args, %Sig{emitter: nil}, st), do: {args, st}
 
+  defp with_emitter(args, %Sig{emitter: %{reply: {reply, text}} = e, emitter_at: at}, st) do
+    {wired, st} = to_wire(e.type, e.text, "x", st)
+    {decoded, st} = from_wire(reply, text, "answer", st)
+    name = "Bendler.ask_#{st.n}"
+    st = %{st | n: st.n + 1}
+    wt = wire_type(reply, text, st)
+
+    helper = """
+    def #{name}(x: #{shim_type(e.text, st)}) -> IO(#{shim_type(text, st)}):
+      do IO<#{shim_type(text, st)}>:
+        answer : #{wt} <- Bendler.ask(#{wire_type(e.type, e.text, st)}, #{wt}, #{inspect(Sig.spec(e.type, st.index))}, #{inspect(Sig.spec(reply, st.index))}, #{wired})
+        IO.pure(#{shim_type(text, st)}, #{decoded})
+    """
+
+    lam = "x => #{name}(x)"
+    {List.insert_at(args, at, if(e.template, do: "~(#{lam})", else: lam)), add_def(st, helper)}
+  end
+
   defp with_emitter(args, %Sig{emitter: e, emitter_at: at}, st) do
     {wired, st} = to_wire(e.type, e.text, "x", st)
     t = wire_type(e.type, e.text, st)
@@ -144,6 +162,10 @@ defmodule Bendler.Gen do
       def Bendler.emit(-A: Type, spec: String, x: A) -> IO(Bool):
         import "./bendler_emit.c"
         import "./bendler_emit.js"
+
+      def Bendler.ask(-A: Type, -B: Type, spec: String, reply_spec: String, x: A) -> IO(B):
+        import "./bendler_ask.c"
+        import "./bendler_ask.js"
       """
     else
       ""
@@ -211,6 +233,12 @@ defmodule Bendler.Gen do
 
   defp any_type?(sig, pred) do
     emitted = if sig.emitter, do: [sig.emitter.type], else: []
+
+    emitted =
+      case sig.emitter do
+        %{reply: {type, _}} -> [type | emitted]
+        _ -> emitted
+      end
 
     Enum.any?(
       [elem(sig.ret, 0) | emitted] ++ Enum.map(sig.params, & &1.type),

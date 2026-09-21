@@ -1,5 +1,40 @@
 # Validation record
 
+## 2026-09-21: review fixes and Port ask callbacks
+
+Local macOS arm64, Apple M2 Pro, Bend 2.0.20, Elixir 1.20.3 and OTP 28:
+
+- Full `mix test --warnings-as-errors`: **177 passed** (16 added tests).
+- Regression tests reproduce the suspended-stream owner-replacement case,
+  reject generated `_stream` name collisions, and preserve APNG repeat counts.
+- Ask tests cover typed Maybe replies, repeated callbacks, handler exceptions,
+  invalid returns, direct reentry rejection, total and independent handler
+  deadlines, caller death, brutal owner death and malformed native replies.
+- CSV tests compare aggregates against NimbleCSV at arbitrary chunk boundaries,
+  exercise typed read failures, EOF, malformed CSV, record caps and ask fuel.
+- Root strict Credo plus an explicit check of five changed demo/script files
+  passed. Dev/library Dialyzer reported zero errors; this does not type-check
+  the test-only demo modules. Root formatting and docs with warnings as errors
+  passed; demo Elixir files were formatted explicitly.
+- `check_ask_asan.exs` passed: repeated small replies, a 64 KiB reply forcing
+  input-buffer growth, EOF, typed errors, reuse, and malformed response rejection
+  before decoding. The intentional malformed reply exits the worker with 65.
+  An initial harness cleanup race after that deliberate exit was corrected;
+  the final script exits successfully. No ASan diagnostic was produced.
+  Like the existing probes, this disables PRESERVE only in the instrumented
+  copy and disables leak detection. It is not a NIF sanitizer test.
+- Five warmed samples at 16 KiB chunks, one worker, file IO included:
+  100k rows took 85.805 ms in NimbleCSV, 265.978 ms in host-driven Bend Port,
+  and 193.700 ms in ask-driven aggregation. All returned identical totals.
+  The refactored benchmark was also smoke-tested. Full methodology and the
+  10k-row measurements are in `demos/csv/ASK.md`.
+
+No Linux or remote CI run was performed for these changes. CI now includes
+the ask ASan probe. NIF events/callbacks, ask+emit in one export, indirect
+callback-cycle detection and long-duration memory measurements remain deferred.
+
+## Earlier validation
+
 Observed 2026-09-20 on macOS arm64 (Apple M-series, 24 schedulers), Bend
 2.0.20 at `~/.bend/bin/bend` (checkout `7561656…`), Elixir 1.21.0-dev on
 OTP 28 (erts 16.4.0.1), Apple clang 21. A smoke test of compatibility and
