@@ -103,5 +103,4 @@ or isolated callback-latency measurement is claimed.
 An export has one callback channel, ask **or** emit, not both, and `ask` is
 a reserved callback parameter name. Multiple handlers, configurable handler
 deadlines, recoverable NIF callback abandonment and concurrent native
-requests are out of scope. The next useful workload is batched graph
-expansion over host-owned data, where Bend decides what data to request.
+requests are out of scope.

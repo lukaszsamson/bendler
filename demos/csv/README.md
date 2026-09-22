@@ -4,7 +4,7 @@ An original Bend implementation of a useful subset of
 [NimbleCSV](https://github.com/dashbitco/nimble_csv)'s eager byte-oriented
 parsing semantics. NimbleCSV 1.3.0 is pinned as a test-only dependency and
 used as the differential oracle and benchmark baseline. No NimbleCSV source
-is copied. Research reference: commit `edd9687688c080cc99ae8d0c18fc0879aa5be1c0`
+is copied. Reference revision: `edd9687688c080cc99ae8d0c18fc0879aa5be1c0`
 (Apache-2.0).
 
 This demo delivers tuples, Maybe and Result in the shared codec rather than
@@ -20,7 +20,7 @@ the boundary. No arbitrary-user-datatype converter is needed.
 
 ## Run
 
-From the repository root, with Bend 2.0.20 and clang installed:
+From the repository root, with Bend 2.0.25 and clang installed:
 
 ```sh
 mix deps.get
@@ -65,7 +65,7 @@ separator (quote, CR, LF or outside a byte). EOF's offset is input byte size.
 Errors return through Result; a subsequent request still works. Parser errors
 do not promise NimbleCSV's wording. Transport errors remain exceptions.
 
-The eager `parse_string/2` API is unchanged. A separate bounded incremental
+The eager API is `parse_string/2`. A separate bounded incremental
 API is described below.
 
 Not implemented: dumping, arbitrary escape
@@ -99,8 +99,8 @@ The script prints the ranges on each run and checks every result.
 **Keep ordinary CSV parsing in NimbleCSV.** Its binary-pattern parser wins
 every measured case. This Bend parser converts input into a byte list,
 allocates field buffers and transfers the entire nested result to the BEAM.
-A future parse-and-compute kernel returning a small aggregate might amortize
-that cost, but this benchmark does not establish it.
+The [ask-driven parser](ASK.md) keeps the reduction in Bend and returns
+a compact aggregate; its separate benchmark measures that trade-off.
 
 ## Streaming over Port and experimental NIF
 

@@ -5,7 +5,9 @@ What is checked, what is known to be imperfect, and what is not covered.
 ## The test suite
 
 `mix test` runs the library suite and every demo's tests against real Bend
-programs built by the real toolchain. There are no mocks of the transport.
+programs built by the real toolchain. Controlled worker fixtures and native
+fault injection exercise lifecycle paths that normal programs cannot reliably
+trigger.
 
 **Signatures and generation.** Exportable defs, skipped defs and the reason
 each was skipped, trailing comments, signatures spanning lines, and
@@ -34,6 +36,9 @@ while the leader PID is still reserved, then reaps and drains output, so it
 neither signals a recycled process group id nor orphans descendants. A
 regression test covers preserving the worker's exit status when the worker
 closes stdin while request bytes are still pending.
+Parent- or child-side `setpgid` returning `EPERM` is accepted only when `getpgid`
+confirms the intended worker group. Fault-injected tests cover acceptance
+of that established group and rejection when it cannot be verified.
 
 **Events.** Ordering, decoding and type checking against the emitter's
 declared type; a corrupt event body (bad tag, trailing bytes, a well-formed
@@ -53,7 +58,7 @@ remaining ordinary data.
 native codec, a parallel call, reference-preserving replies, expired
 deadlines, time spent before encoding, cancellation of queued and of
 running work, bounded admission, caller death, large finite timeouts, an
-invalid request refused on the calling thread before anything reaches the
+invalid request refused by dirty-scheduler validation before anything reaches the
 runtime, a request withdrawn before the loop picked it up leaving the loop
 parked cleanly, and a `Nat` overflow freezing one module while another NIF
 module keeps working. Event tests add typed scalar, tuple and datatype
@@ -86,12 +91,18 @@ with the actual figures printed.
 - `mix compile --warnings-as-errors` and `mix test --warnings-as-errors`
 - `mix docs --warnings-as-errors`
 
+Default formatting and Credo inputs cover `lib`, `test` and project configuration,
+not all demo sources. Dialyzer checks the development build; demo modules compiled
+only in the test environment are not part of that analysis.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on macOS 15 arm64 and Ubuntu 24.04 x86_64.
-Bend 2.0.20 and LLVM clang 21.1.8 are installed from release archives with
+Bend 2.0.25 and LLVM clang 21.1.8 are installed from release archives with
 pinned SHA-256 checksums, OTP is 28.1, Elixir is 1.20.3, actions are
-commit-pinned and dependencies are locked. Both jobs are green at HEAD.
+commit-pinned and dependencies are locked. See the
+[workflow run history](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml)
+for results for each pushed revision; local commits have not necessarily run in CI.
 
 Each job runs, in order: the toolchain check, `mix deps.get`, formatting,
 compilation with warnings as errors, the test suite, strict Credo,
@@ -132,10 +143,11 @@ not establish graceful thread joins.
 The ASan probes build a separate instrumented port executable from the
 generated C and drive it from Elixir. Instrumentation stays enabled across
 the codec and the runtime. The instrumented copy, and only it, disables
-Bend's `PRESERVE` calling-convention attributes: an ASan-instrumented
+Bend's `PRESERVE` calling-convention attributes. On the tested arm64 toolchain, an ASan-instrumented
 `preserve_none` machine segment clobbers the arm64 register holding
 `corpus_eval`'s spill-frame address, which is then reloaded as a null
-`Corpus` argument. The normal generated shim and the NIF keep the
+`Corpus` argument. This is an instrumentation compatibility workaround, not
+a demonstrated failure of an uninstrumented build. The normal generated shim and the NIF keep the
 `PRESERVE` attributes. Leak detection is off.
 
 This is external-port coverage only. It is **not** sanitizer coverage of a
@@ -145,18 +157,11 @@ claimed.
 ## Known issues
 
 - **Rare port exit status 74 in full-suite runs.** Transport exits with
-  status 74 have been observed in whole-suite runs, and their cause was not
-  established. Targeted reruns of the event and Murmur suites across ten
-  seeds did not reproduce them.
-- **A launcher EPIPE race is fixed.** A worker that closed stdin after
-  POLLOUT became ready, then exited 65, could have its status masked as 74
-  by the launcher's own write failure. The launcher instead stops forwarding
-  input, drains output and reports the worker's real status, pinned by a
-  deterministic regression test. This fix does not account for the
-  unexplained failures above.
-- **The PRESERVE attribute workaround** above is an instrumentation
-  compatibility adjustment, not a diagnosis of a bug in Bend's generated
-  code.
+  status 74 can originate from several paths. A parent-side `setpgid` failure
+  is covered by the verified-group handling above; logs from older failures
+  are insufficient to attribute every occurrence to it. Diagnostics identify launcher versus worker
+  endpoints and include errno or poll flags without logging payloads;
+  preserve that stderr output when reporting a recurrence.
 
 ## Not validated
 

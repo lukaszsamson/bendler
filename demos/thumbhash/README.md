@@ -11,21 +11,22 @@ as the prelude's `B.Bytes` (one buffer block; `thumbhash/3` still takes a
 `List<U32>` for comparison) and the hash comes back as a list of bytes.
 Floats stay inside Bend as `F32`.
 
-What the port taught:
+## Precision and implementation constraints
 
 - **F32 versus doubles.** The reference computes in Elixir doubles and
   Bend in 32-bit floats. Most hashes agree byte for byte; a coefficient on
   a quantisation boundary can land one level off. The tests accept a
-  one-step difference and require most cases to be exact. A first-class
-  `F64` or a documented precision policy is what a real port would need.
+  one-step difference and require most cases to be exact. This tolerance
+  is the demo's precision policy; it does not promise bit-identical hashes
+  for every input.
 - **The reference has a latent bug**: it encodes the alpha channel without
   passing `w` and `h`, so any image with transparency crashes. The copy
   here fixes that, following the original JavaScript.
-- **Bend shapes the code**: no `match` on a computed value (every `if` is
-  a helper def taking a `Bool`), no destructuring a call result, callees
-  above callers, no mutual recursion (row chunking became a fold with a
-  state tuple, the coefficient walk a generate-then-filter), and the
-  shrinking argument first in every recursive def.
+- **Bend implementation shape**: helper defs take computed conditions,
+  callees precede callers, row chunking uses a fold with a state tuple,
+  and the coefficient walk generates then filters. Recursive defs put the
+  shrinking argument first. These describe this implementation, not a
+  complete account of Bend's syntax restrictions.
 - **Bytes as a list cost more than the DCT** at 100x100: 10.8 ms as a
   `List<U32>` against 5.8 ms as `Bytes`. A batch of 32 small images lost
   to `Task.async_stream` as lists and wins as `Bytes` (9 ms vs 18 ms).

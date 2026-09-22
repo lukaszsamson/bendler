@@ -19,7 +19,7 @@ describes what is checked.
 
 | Component | Status |
 |---|---|
-| Bend | 2.0.20 only |
+| Bend | 2.0.25 only |
 | OTP | 28 baseline |
 | macOS | arm64, covered by macOS 15 CI (Metal API baseline) |
 | Linux | x86_64 / Ubuntu 24.04, covered by CI |
@@ -27,7 +27,7 @@ describes what is checked.
 
 ## Usage
 
-```elixir
+```python
 # bend/fib.bend
 import Base
 
@@ -43,7 +43,7 @@ def pow2(+n: Nat) -> U32:
     case 0n:
       1
     case 1n+p:
-      a b = pow2(p) pow2(p)   # a parallel call: runs on every core
+      a b = pow2(p) pow2(p)   # parallel calls on the configured worker pool
       (a + b : U32)
 ```
 
@@ -62,7 +62,7 @@ Fib.pow2(20)        #=> 1048576
 
 `bend` emits C and `clang` builds it. Both must be installed (`bend` is
 looked up on `PATH`, then at `~/.bend/bin/bend`; `config :bendler, bend:
-path` overrides). Only Bend 2.0.20 is accepted, because the C side depends
+path` overrides). Only Bend 2.0.25 is accepted, because the C side depends
 on runtime internals; `config :bendler, allow_any_bend: true` lifts the gate.
 CI pins LLVM clang 21.1.8, OTP 28.1 and Elixir 1.20.3. When using upstream
 LLVM on macOS, set `SDKROOT` to `xcrun --sdk macosx --show-sdk-path`; the CI
@@ -135,11 +135,13 @@ writes next to any source using it; import it as `import ./bendler.bend
 as B`. A `Bytes{len, buf}` holds one byte per slot of an `Array<U32>`
 buffer, so a binary crosses as one block instead of a list cell per byte
 (30x faster for 64 KB in the Murmur3 demo). `B.Bytes.to_list/1`,
-`B.Bytes.from_list/1` and `B.Bytes.at/2` are the helpers.
+`B.Bytes.from_list/1`, `B.Bytes.from_list_n/2` (a known length bound) and
+`B.Bytes.at/2` are the helpers.
 
 A def is exported when all its parameters and its result are of these types,
 or when its result is `IO(T)` of one of them (see "Events out of Bend").
-Erased (`-`) and template (`~`) parameters, closures, arrays and
+Except for the recognized emit and ask callbacks below, erased (`-`) and
+template (`~`) parameters, closures, arrays and
 unsupported types keep a def out (it is reported at debug level). `main` is
 never exported: the shim supplies its own. Reusable (`+`) parameters are
 honoured.
@@ -165,21 +167,22 @@ end)
 ```
 
 The emitter is not a wire argument: the shim supplies a lambda over a
-fourth foreign effect, `Bendler.emit`, which encodes the value with the
+foreign effect, `Bendler.emit`, which encodes the value with the
 same codec a reply uses, writes it as an EVENT frame and then parks on the
-host's one-byte acknowledgement. That acknowledgement is the whole
-backpressure and cancellation story: at most one event is outstanding, the
+host's acknowledgement. At most one event is outstanding, the
 worker cannot run ahead of the consumer, and an acknowledgement of `False`
 is a typed, cooperative "stop" that the def sees as an ordinary value.
 
 Every export with an emitter gets two functions: `fun(...)`, which refuses
-the events at once (the def's first emit is answered `False`, so it
-finishes early), and `fun_stream(...)`, a lazy `Enumerable` of
+the events at once (each emit answers `False`, asking the def to stop),
+and `fun_stream(...)`, a lazy `Enumerable` of
 `{:event, value}` ending in `{:done, result}`. Demand drives the
 acknowledgements: the one for an event goes out when the next is asked
 for, so a paused consumer holds one event and the worker waits. Halting
 early (`Enum.take/2`), an exception in the consumer, and the consumer's
-death all end the turn and free the port. Events are type-checked like
+death request cancellation. The port becomes reusable after the def returns;
+a finite in-flight deadline terminates a worker that ignores cancellation.
+Events are type-checked like
 replies. Write the emitter with `~` (Bend's template marker) whenever the
 def emits more than once: a Bend function type is Type-kinded, so a
 closure binder can never be reusable.
@@ -242,7 +245,7 @@ rejected the frame), `:nomem` (a native transport allocation failed),
     ▼
   NIF admission → dirty validation ─▶ Bendler.fn()    (foreign effect: waits for a frame)
    or Port ({:packet, 4}) ────────▶    Bendler.arg(T)  (foreign effect: decodes one argument)
-                                        M.fib(n, a, b)  (the user's def, on every core)
+                                        M.fib(n, a, b)  (the user's Bend def)
   ◀── event frame/message ◀────────   Bendler.emit(T, x)  (writes, then waits
     ── acknowledgement ───────────▶                        for the host's answer as a Bool)
   ◀──────────── reply frame ◀────────  Bendler.reply(T, x) (foreign effect: encodes the result)
@@ -254,10 +257,10 @@ foreign effects (`Bendler.fn`, `Bendler.arg`, `Bendler.reply`, plus
 loops: read a function index, pull each argument, call the def, reply.
 Bend's own compiler emits the C; the effects are ordinary Bend foreign C
 files (`priv/c/`), spliced into that C by the compiler. The same shim serves
-both backends, only the transport header differs:
+both backends, with transport-specific delivery helpers and NIF glue:
 
 - **port**: length-prefixed frames on stdin/stdout, the reads parked on
-  Bend's event loop (`io_wait_on`), so the loop never blocks.
+  Bend's event loop (`io_wait_on`). Reply writes can block on pipe backpressure.
 - **NIF**: the emitted C is patched (`main` → `bend_main`, the runtime's
   signal handlers dropped, `_exit` → `bendler_die`) and linked as a shared
   library with a small `erl_nif` entry table. Checked initialization pins
@@ -265,27 +268,28 @@ both backends, only the transport header differs:
   Normal-scheduler admission precedes dirty validation and copying; native
   completion sends a message. Waiting uses an ordinary Elixir `receive`.
 
-Every value that crosses is a Base type the runtime lays out itself
-(`io_str`, `io_node(CID_CON, ...)`, packed `Bool`), which is why the C side
-never has to know the layout of a user constructor.
+The codec constructs Base values and the controlled `Bytes` and `Dyn` types
+from Bendler's prelude with runtime helpers. Generated Bend converters handle
+user constructors, so C does not depend on their arbitrary layouts.
 
 ## Limits and hazards
 
 - **One request at a time per module.** The shim's loop is sequential;
   admission is bounded (`max_queue`, `max_waiting`) and the rest are told
-  `:busy` at once. Inside a call, Bend still uses every core. An event
+  `:busy` at once. Pure forks inside a call use the configured worker pool. An event
   belongs to the one request in flight, and its acknowledgement round trip
-  is a whole transport round trip, so events are for meaningful units of
-  work (a rendered frame), not for streaming small values.
-- **Events and asks are cooperative on both backends.** `False` is a value
+  adds a transport round trip. Batch fine-grained events when that cost
+  dominates useful work; measure the trade-off for your workload.
+- **Event cancellation is cooperative on both backends.** `False` is a value
   the Bend def must act on; a def that ignores it keeps being answered
-  `False` until it returns. Only the total deadline is involuntary, and on
-  the port it discards the whole worker.
-- **Batch small calls.** With the launcher, telemetry and codec budgets,
-  a short Levenshtein port call averaged 48 µs locally. A 64-pair medium
-  batch averaged 9.6 µs/pair versus Elixir's 37.8 µs/pair. A tiny typed
-  call averaged 15.6 µs on the NIF against 19.9 µs on the port.
-- **Port deadlines stop the worker.** The owner closes the port and stops;
+  `False` until it returns. A finite Port deadline can terminate the whole
+  worker. Ask callbacks instead require a typed response; abandonment
+  replaces the Port worker or freezes the NIF module.
+- **Batch small calls.** Encoding and hand-off costs can dominate short
+  kernels. The [Levenshtein benchmark](demos/levenshtein/bench.exs) compares
+  individual and batched calls against an Elixir reference.
+- **In-flight Port deadlines stop the worker.** A queued request can expire
+  without stopping it. For an in-flight timeout, the owner closes the port and stops;
   a separate POSIX launcher sends TERM to the worker process group, then
   KILL after 200 ms, and reaps the child. Owner death is covered too. This
   discards the whole worker, not just one computation.
@@ -309,16 +313,17 @@ never has to know the layout of a user constructor.
   It deliberately retains the library, threads and memory; this is not
   graceful runtime unload. Upgrade is refused. Replacing a loaded artifact
   or repeatedly reloading modules is unsupported.
-- **The NIF deadline** is absolute and starts before encoding. Scheduler
+- **The NIF deadline** is absolute. Ordinary calls and streams start it
+  before encoding; ask calls currently start it after initial encoding. Scheduler
   queueing and validation consume the same budget, but scheduling can still
   delay delivery of the timeout. This is not a hard real-time guarantee.
 - **The emitted C is patched by regex.** The build asserts each patch
   matched exactly as expected and that no `sigaction`, `signal`, `_exit` or
-  `abort` call survives; a Bend release that changes the runtime fails the
-  build rather than hosting something unexpected.
+  `abort` call survives. These checks and the version gate guard known
+  assumptions; they cannot prove compatibility with an arbitrary Bend release.
 - **A malformed request never reaches a def.** Every request is validated
   against the export's type spec, without allocating, before it is handed
-  to the runtime: the NIF does it on the calling thread and answers
+  to the runtime: the NIF does deep validation on a dirty CPU scheduler and answers
   `:refused`; the port worker answers an error frame and goes on. Frames
   are capped at 64 MiB (`-DBENDLER_MAX_FRAME`), list items per request at
   16M (`-DBENDLER_MAX_ITEMS`), type-spec nesting at 32 and value nesting

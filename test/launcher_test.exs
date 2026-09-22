@@ -9,6 +9,8 @@ defmodule Bendler.LauncherTest do
           {"priv/c/bendler_launcher.c", "bendler_launcher", []},
           {"test/fixtures/closing_worker.c", "closing_worker", []},
           {"test/fixtures/delayed_launcher.c", "delayed_launcher", []},
+          {"test/fixtures/group_race_launcher.c", "group_race_launcher", []},
+          {"test/fixtures/group_race_launcher.c", "group_rejected_launcher", ["-DREJECT_GROUP"]},
           {"test/fixtures/stubborn_worker.c", "worker", []},
           {"test/fixtures/stubborn_worker.c", "descendant_worker", ["-DDESCENDANT"]}
         ] do
@@ -119,6 +121,23 @@ defmodule Bendler.LauncherTest do
       assert_receive {^port, {:exit_status, 65}}, 3000
     after
       if Port.info(port), do: Port.close(port)
+    end
+  end
+
+  test "EPERM on either side is accepted only with a verified worker process group", %{exe: exe} do
+    for {launcher, expected} <- [{"group_race_launcher", 0}, {"group_rejected_launcher", 74}] do
+      port =
+        Port.open({:spawn_executable, Path.join(Path.dirname(exe), launcher)}, [
+          :binary,
+          :exit_status,
+          args: ["/usr/bin/true"]
+        ])
+
+      try do
+        assert_receive {^port, {:exit_status, ^expected}}, 3000
+      after
+        if Port.info(port), do: Port.close(port)
+      end
     end
   end
 end

@@ -7,13 +7,12 @@ guarantees. The port backend is the supported one ([API.md](API.md)).
 
 Nothing here gives Bend access to Erlang terms. The interface is the same
 bounded binary frame codec the port uses; more BEAM APIs would not mean more
-Bend types. The design was checked against OTP 28's `erl_nif.md` and its
-resource implementation in `erl_nif.c`.
+Bend types. Resource ownership and scheduling use OTP 28's NIF APIs.
 
 ## The call path
 
-1. A generated function captures an absolute monotonic deadline before it
-   encodes its arguments.
+1. An ordinary generated call captures an absolute monotonic deadline before
+   encoding its arguments. Ask calls are an exception (see Deadlines).
 2. `__bendler_submit/3` checks the envelope and reserves bounded admission
    on a normal scheduler. A saturated module answers `:busy` without waiting
    for a dirty scheduler.
@@ -74,8 +73,11 @@ Each module reserves 8 GiB of virtual address space for the runtime's arena
 
 ## Deadlines
 
-Deadlines are absolute monotonic milliseconds captured before encoding, and
-they include queue time. `enif_monotonic_time` is valid only on scheduler
+Deadlines are absolute monotonic milliseconds and include queue time.
+Ordinary calls capture them before argument encoding; streams capture them
+when enumeration starts, before encoding. Ask calls currently capture them
+after initial argument encoding, so that encoding time is outside their
+timeout budget. `enif_monotonic_time` is valid only on scheduler
 threads and returns `ERL_NIF_TIME_ERROR` elsewhere, so admission converts
 the remaining BEAM duration into a `CLOCK_MONOTONIC` deadline on the
 scheduler, and Bend's pthread uses that OS monotonic value. A parked emit
@@ -83,7 +85,8 @@ sets an IO timer, so a paused consumer's finite deadline fires without
 another acknowledgement. The Elixir receive enforces the same deadline.
 
 Caller death or a timeout removes queued work. Running work stays admitted
-until it completes: pure running work cannot be interrupted.
+until it completes, or remains pinned if the runtime freezes: pure running
+work cannot be interrupted.
 
 ## Events
 

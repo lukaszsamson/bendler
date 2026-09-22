@@ -122,14 +122,15 @@ The BinaryBackend is dramatically slower on this workload (the 262,144-pixel
 baseline takes tens of seconds per sample); use smaller `DEPTHS` for a quick
 correctness check. It is deliberately not used for the headline speedup.
 
-## Types and GPU findings
+## Numeric representation and CPU scope
 
-No new base types were necessary: the upstream kernel deliberately uses signed
+The upstream kernel uses signed
 8.8 fixed-point values represented by wrapping U32 operations. The independent
 Elixir and Nx implementations reproduce those shifts/overflows exactly. There
 is no floating-point tolerance hiding incorrect results.
 
-No GPU build support was added. The imported upstream `main` contains a `!`
+This demo is CPU-only; Bendler's experimental GPU support is exercised by
+the raytracer demo. The imported upstream `main` contains a `!`
 call, but Bendler reaches `rend` through its generated CPU dispatcher; the
 generated C has `BANGS 0` and the worker runs with `--gpu off`. Merely changing
 a command-line flag would not offload this binding. Offloading this kernel would

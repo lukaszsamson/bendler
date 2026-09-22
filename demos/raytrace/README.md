@@ -207,11 +207,11 @@ Same machine, 12 threads, 320x240, 24 frames, five warm samples:
 | cancel (3rd frame) to the next call answered | 0.358 ms | 0.325 | 0.442 |
 | `save_apng` of 24 frames (render + deflate + write) | 334.2 ms | 291.0 | 377.0 |
 
-The acknowledgement round trip does not cost anything here: 8.45 ms per
-frame inside one call against 9.78 ms per separate call, because the
+The single-call path averages 8.45 ms per frame against 9.78 ms per separate
+call, because the
 scene is encoded, validated and converted once instead of 24 times. The
-event channel is therefore *cheaper* than a call per frame as well as
-being incremental. Cancellation is sub-millisecond end to end: the
+event path is cheaper overall in this measurement, but this comparison does
+not isolate acknowledgement cost. Cancellation is sub-millisecond end to end: the
 0.358 ms above covers the refusal reaching the worker, `fly` returning,
 its reply crossing, and a small unrelated call being served afterwards.
 
@@ -238,7 +238,7 @@ The differences are not spread evenly: they sit on silhouettes, on the
 shadow boundary and where a channel lands exactly on a quantisation
 step, which is where single and double precision disagree about which
 side of a comparison a value falls. This is the same finding as the
-ThumbHash demo's, one algorithm louder: Bend 2 has no `F64`, so a port
+ThumbHash demo's: the pinned Bend 2.0.25 has no `F64`, so a port
 that must match a double-precision reference bit for bit cannot.
 
 The float code itself is verified exactly rather than approximately:
@@ -263,10 +263,9 @@ comparison against doubles is fuzzy.
 - The scene crosses on every call, so a 10,000-sphere scene would pay the
   datatype conversion (~1 µs per node) 20 times over a tiled render.
   Keep scenes small, or render in one call.
-- `:timeout` stops the port owner; it does not kill the render. The
-  worker exits when it next writes to the closed pipe, which is the
-  `bendler: stdout write failed` line the deadline tests print. That is
-  the library's documented cancellation limit, not this demo's.
+- An in-flight `:timeout` stops the port owner. The launcher terminates
+  the worker process group, escalating from TERM to KILL after 200 ms,
+  and reaps the child; it does not wait for the renderer to write again.
 - The PNG writer is 8-bit truecolour with filter 0 only. It is not a PNG
   library. The APNG writer adds `acTL`/`fcTL`/`fdAT` over it: full-size
   frames, no dispose or blend modes, no inter-frame delta.
@@ -276,30 +275,27 @@ comparison against doubles is fuzzy.
 - An event costs a pipe round trip, so `fly` emits whole frames. Emitting
   per tile or per row would spend more on acknowledgements than on rays.
 
-## What the port taught
+## Implementation constraints
 
-- **A def bendler cannot read is skipped quietly.** The reason is
-  reported at debug level, which is easy to miss: run
-  `MIX_ENV=test mix compile` and read the
-  `does not export ...` lines. Two of the ThumbHash demo's defs are in
-  that position.
+- **Unsupported defs are skipped during automatic export discovery.**
+  The reason is logged at debug level. Explicitly naming an unsupported
+  def in `exports:` fails the build. Multiline signatures are supported.
 - **The generated `@type` per datatype collides with your own.** The
   module gets `vec/0`, `sphere/0`, `scene/0` from the Bend `type`
   declarations, so writing those typespecs by hand is a compile error.
   Use the generated ones (they are what this module's `@spec`s refer to).
 - **A tuple is `Type`-kinded, so it cannot live in a `List<&2, _>`.**
-  The flattened sphere started as an eight-wide tuple and had to become
-  `type Sph8 is Data` before the scene list could be reusable across
-  forks. Flat `Data` records are the shape that works.
+  The flattened sphere uses `type Sph8 is Data` so the scene list is
+  reusable across forks.
 - **Flatten before the hot loop.** Carrying `Sphere{center: Vec, ...}`
   through the nearest-hit fold clones a three-node structure per sphere
   per ray. Converting the scene once to a flat eight-word record and
   carrying that is worth a large constant factor.
 - **The prelude's `Bytes.from_list` walks the list three times** (a
   reusability copy, a length, a fill). The length here is known up front
-  (`tw * th * 3`), so the demo packs the array itself in one pass: 640x480
-  went from 57 ms to 40 ms on twelve threads. A `Bytes.from_list` that
-  takes a known length would be a useful prelude addition.
+  (`tw * th * 3`), so the demo packs the array itself using that bound.
+  The prelude also provides `Bytes.from_list_n`
+  for constructing bytes with a known length bound.
 
 ## The GPU lane
 
@@ -311,7 +307,7 @@ sees the `!`, compiles the port with Bend's Metal lane (CUDA on Linux
 when installed) and ships the device program as `<exe>.gpu` beside the
 executable, the way `bend -o` does.
 
-Measured on an M2 Pro (12 threads, 5 samples):
+Measured with Bend 2.0.20 on an M2 Pro (12 threads, 5 samples):
 
 | kernel | CPU pool | GPU |
 |---|---:|---:|
@@ -333,10 +329,11 @@ contention. A bang whose forks form a long right spine (forking the
 tile list as `a b = tile(x) go(rest)`, with 300 tiles) ends in a runtime
 `memory fault (machine stack overflow?)` that kills the port, which the
 owner reports as `{:exit_status, 1}` and a supervisor restarts. Reduced to
-a pure Bend program and reported as bendlang/bend#918: a spine of about a
-thousand forks dies on Metal, the CPU pool takes any depth, and a balanced
-tree of the same leaves is fine. Both exports therefore fork the tile list
-as a balanced tree. With it,
+a pure Bend program, this is [#918](https://github.com/bendlang/bend/issues/918),
+fixed upstream in [Bend 2.0.23](https://github.com/bendlang/bend/issues/918#issuecomment-5754216072)
+and included in Bendler's pinned 2.0.25. The measurements above used 2.0.20.
+Both exports fork the tile list
+as a balanced tree, which also helps performance. With it,
 the GPU lane's best for 640x480 is 62 ms in one bang of 300 32-pixel
 tiles (100 ms with 80 64-pixel tiles, 3 s with one tile: the device
 wants leaves), against 24 ms on the CPU pool; a 1920x1200 bang runs
@@ -345,18 +342,16 @@ Interactivity`), which ends the port with status 1 as well. So the GPU
 is still the slow lane for this kernel, and a long kernel is a second
 way to lose the port.
 
-Three changes made for the device paid on the CPU: the row tree is no
-longer appended into one list at every fork (`List.append` is not tail
-recursive; a frame per pixel word was the first thing to overflow the
-device stack), a row is a tail loop pushing each pixel onto the words so
-far, and the tiles of a call fork as a balanced tree. Together they took
-640x480 from 54 ms to 27 ms on 12 threads.
+The row tree avoids repeated `List.append` at forks, each row is a tail
+loop pushing pixels onto the accumulated words, and the tiles fork as a
+balanced tree. These choices reduce stack pressure and intermediate lists
+on both CPU and GPU.
 
 What a GPU-fast version needs is the upstream shape: the scene baked
 into per-lane words rather than a shared list, no constructor per ray,
 and a fork tree sized to the lane cube (the guide's 4^7 leaves). That is
-a different kernel, not a flag, so it stays a separate experiment
-(bendlang/bend#828). The library side is done: `:gpu` on `use Bendler`
+a different kernel, not a flag. The experimental library support includes
+`:gpu` on `use Bendler`
 and `start_link/1`, the `.gpu` artifact, and the NIF backend refusing
 the option (the runtime looks for the device program beside the
 executable, which in the BEAM is the VM's own).

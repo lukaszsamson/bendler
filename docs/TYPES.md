@@ -49,7 +49,7 @@ trailing bytes have regression coverage.
 The C codec uses Base's canonical Tuple/Some/None/Done/Fail constructors at
 the foreign-effect boundary, where the compiler boxes specialized values.
 It does not infer arbitrary user-defined constructor layouts. This is
-an internal Bend 2.0.20 ABI, not a stable foreign-library ABI. Rebuild
+an internal Bend 2.0.25 ABI, not a stable foreign-library ABI. Rebuild
 native artifacts when upgrading Bendler or Bend; no mixed-version wire
 negotiation is provided. Generated modules receive matching Elixir specs.
 
@@ -64,7 +64,7 @@ See `test/composite_test.exs` for nested values on both transports, and
 | `Char` | integer code point |
 | `Map<V>`, `Map<&2, V>` | `%{binary => v}` |
 
-**F32.** Bend 2 has no `F64`, so the boundary is single precision and says
+**F32.** The supported Bend 2.0.25 toolchain has no `F64`, so the boundary is single precision and says
 so: an Elixir double is rounded to the nearest single on the way in
 (`0.1` arrives as `0.10000000149011612`) and a double past the single
 range (`abs(x) >= 3.4028235677973366e38`) raises `ArgumentError` rather
@@ -88,8 +88,8 @@ from C would tie bendler to its internals, so the wire form is the pair list
 user's def: `M.f(Map.from_list(&k, V, xs))` on the way in and
 `Map.to_list(&k, V, M.f(...))` on the way out, with `k` the kind the
 signature wrote (`Map<V>` is `Map<&1, V>`; `Map.get` and reusable `+`
-binders want `Map<&2, V>`). Building the trie is `O(n log n)` string
-comparisons in Bend, which is the cost of not knowing the layout. Because
+binders want `Map<&2, V>`). Building the trie traverses keys and allocates
+nodes; cost depends on the number and lengths of keys. Because
 the conversion wraps the whole call, a Map must be a whole parameter or
 result; `List<Map<U32>>` or `Map<U32> & U32` keep a def out. Keys are
 valid UTF-8 binaries; other keys, including invalid UTF-8 binaries, raise
@@ -164,12 +164,9 @@ validation excludes) yields the type's first finite constructor.
   that does not hold it back);
 - some constructor must have a finite value, for the fallback.
 
-**Limits and cost.** Values nest up to 2048 constructors deep (a linked
-list of 2048 cells; use `List<T>` for sequences). Each node costs a `Dyn`
-allocation on both sides plus the converter's pattern matches: a 4093-node
-tree crosses into Bend in 1.6 ms and round-trips in 3.6 ms through the
-port, and a list of 10,000 three-field records in 5.3 ms, of which the
-Elixir encoder is about a third. Prefer flat `List<T>` of small records
+**Limits and cost.** The value-depth limit is 2048 and includes nested
+composite values, not just recursive user constructors. Each node adds `Dyn`
+representation and converter work. Prefer flat `List<T>` of small records
 over deep recursion when speed matters.
 
 ## Events: `IO(T)` exports and emitter parameters
@@ -203,8 +200,9 @@ needs an `IO(T)` result.
 | Bend | Elixir |
 |---|---|
 | `def f(~emit: T -> IO(Bool), ..) -> IO(R)` | `f(..)` and `f_stream(..)` |
-| an `emit(x)` answering `True` | `{:event, x}` from the stream |
-| an `emit(x)` answering `False` | the consumer has gone: stop |
+| `emit(x)` with an active stream | yields `{:event, x}`, then waits for demand |
+| an `emit(x)` answering `True` | the host requests continued production |
+| an `emit(x)` answering `False` | the host declines further production: stop |
 | the def's result | `{:done, result}`, the stream's last element |
 
 ### The EVENT frame
@@ -219,13 +217,14 @@ The host answers every event with an **acknowledgement frame**: one byte,
 stream that carries requests. The worker parks on it with the runtime's
 `io_wait_on` (as `bl_frame_more` does), so the event loop is never spun,
 and the in-flight request's bytes stay where they are in the input buffer
-while the acknowledgement is consumed from behind them. The request frame
-format is unchanged, and `BENDLER_MAX_FRAME` bounds an event like any
+while the acknowledgement is consumed from behind them.
+`BENDLER_MAX_FRAME` bounds an event like any
 other frame.
 
 At most one event is outstanding, so the worker cannot run ahead of its
-consumer. A `False` is the only cancellation there is: it is typed, it is
-cooperative, and a def that ignores it simply keeps being told `False`.
+consumer. `False` requests cooperative cancellation: a def that ignores it
+keeps being told `False`. A finite in-flight Port deadline can instead
+terminate the entire worker; a NIF deadline cannot stop running pure work.
 
 Events work on Port and the experimental NIF. The NIF delivers a typed
 payload in `{:bendler_event, ref, sequence, binary}` and accepts

@@ -26,9 +26,9 @@ the export gets a second generated function, `name_stream/n`, yielding
 (Bend's template marker) whenever the def emits more than once: a function
 type is Type-kinded, so a closure binder cannot be `+`. `+emit:` is refused.
 
-The following are deliberately not exported: `main`, erased (`-`) or other
-template (`~`) parameters, closures that are not emitters, arrays,
-unsupported types, and a `Map` nested inside another type (for example
+The following are deliberately not exported: `main`, erased (`-`) parameters,
+template (`~`) parameters other than recognized callbacks, closures that are
+neither emitters nor asks, arrays, unsupported types, and a `Map` nested inside another type (for example
 `List<Map<U32>>`). A Map value is converted as a whole by the Bend prelude
 and may not contain a user datatype. Def names that collide after `.`
 becomes `_` are rejected. Sequential `IO(T)` exports, emitters and typed ask
@@ -77,7 +77,9 @@ def runs.
 expired call, `:exited` for port termination, `:dead` for a frozen NIF runtime,
 `:refused` for invalid native requests, `:nomem` for a native transport
 allocation failure, and `:build` for build/other boundary invariant failures.
-Port deadlines include owner queue time; termination fails other pending
+Port deadlines begin at owner admission, after host argument encoding, and
+include owner queue time. A queued request can expire without stopping the
+worker; an in-flight deadline stops it. Termination fails other pending
 calls rather than retrying them. The launcher watches owner-pipe EOF, sends
 TERM to its worker group, KILL after 200 ms, and reaps the child. This also
 works when the owner is killed and its terminate callback cannot run. It is
@@ -95,10 +97,10 @@ racing a replacement owner could allow concurrent artifact writes.
 
 Worker-to-host frames are a reply (a value tag, or `0` for the transport
 error) or an EVENT frame led by `16` (`BL_EVENT`) and holding one encoded
-value of the emitter's type. Host-to-worker frames are a request, unchanged,
+value of the emitter's type. Host-to-worker frames are a request
 or a one-byte acknowledgement (`1` go on, `0` stop) answering the event the
 worker is parked on. `BENDLER_MAX_FRAME` bounds an event like any frame, and
-the exit-code contract (0 clean EOF, 65 framing, 74 transport) is unchanged;
+the exit-code contract is 0 clean EOF, 65 framing, 74 transport;
 EOF while an acknowledgement is awaited is the host leaving, so the worker
 exits 0.
 
@@ -112,8 +114,8 @@ large Murmur request frames.
 At most one event is outstanding. An event belongs to the one request in
 flight. With a live subscriber the port owner forwards it and waits for the
 subscriber's acknowledgement; without one (a plain call, a cancelled or dead
-subscriber) it answers `false` at once and drops the event, so the def stops
-early. The owner never blocks on a consumer, and the request's total
+subscriber) it answers `false` at once and drops the event, asking the def to
+stop early. The owner does not wait synchronously for a consumer, and the request's total
 deadline keeps running while events flow: a deadline that fires during an
 acknowledgement wait stops the owner exactly as for any other call.
 
@@ -141,19 +143,25 @@ neither arguments nor return values are included in metadata. Forced caller
 death can leave a start event without its matching completion event.
 
 A generated `_stream` opens its span when the stream is first reduced and
-closes it when the request ends, so the span covers the whole request, not
-one event and not the consumer's own work. A consumer that raises still
-closes the span as `:stop` once the def returns.
+closes it when the terminal result is received or during cleanup. The wall-clock
+span includes demand pauses and consumer processing between pulls, not just
+native execution. A consumer exception is not itself a native-call failure:
+normal stream cleanup can report `:stop` even when downstream consumer code
+raised. Native receive/decoding failures have separate error paths.
 
 ## Platform matrix
 
 | Target | Bend toolchain pin | CPU port status | NIF status |
 |---|---|---|---|
-| macOS arm64 | Bend 2.0.20 archive, SHA-256 pinned in CI | macOS 15 CI verified | isolated probes pass; still experimental |
-| Linux x86_64 | Bend 2.0.20 archive, SHA-256 pinned in CI | Ubuntu 24.04 CI verified | isolated probes pass; still experimental |
+| macOS arm64 | Bend 2.0.25 archive, SHA-256 pinned in CI | macOS 15 CI target | isolated CI probes; still experimental |
+| Linux x86_64 | Bend 2.0.25 archive, SHA-256 pinned in CI | Ubuntu 24.04 CI target | isolated CI probes; still experimental |
 | Other targets | not packaged by this project | unsupported | unsupported |
 
-The CPU binding contract covers bounded pure functions, not Bend's Window or
+See the [CI run history](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml)
+for validation results for each pushed revision.
+
+The CPU binding contract covers bounded pure functions and sequential IO with
+the documented emit or ask channel, not Bend's Window or
 Audio effects. Those effects need separate lifecycle and transport design;
 Linux also requires their X11/ALSA development libraries and link flags.
 The supported generated programs include neither effect, so their builds do
@@ -167,7 +175,9 @@ threads. Purge does not reclaim its runtime; hot upgrade/reload is unsupported.
 Rebuild artifacts with the old VM stopped; no mixed-version ABI negotiation
 is provided. See `NIF.md`.
 
-NIF deadlines are absolute monotonic milliseconds captured before encoding.
+NIF deadlines are absolute monotonic milliseconds. Ordinary calls capture
+them before encoding; streams do so at enumeration before encoding. Ask calls
+currently start their budget after initial argument encoding.
 Admission precedes dirty validation/copying; waiting uses an ordinary process
 receive. Caller death or timeout removes queued work, while running work stays
 admitted until completion. Cancellation synchronizes with sending so the
@@ -208,8 +218,8 @@ work still cannot be interrupted. The Elixir receive also enforces its deadline.
 The supported effect topology is a sequential IO spine. Concurrent emits via
 `IO.fork` are unsupported; overlapping events freeze the module rather than
 creating an unbounded mailbox. Runtime fatal errors notify live callers and
-freeze that module as before. VM-lifetime pinning, no reload/unload, and all
-other NIF hazards are unchanged.
+freeze that module. VM-lifetime pinning and no reload/unload apply to events
+as well as ordinary calls.
 
 ## Ask callback contract
 
@@ -258,6 +268,7 @@ monitors their caller and kills and reaps the handler on completion or
 abandonment.
 
 Event cancellation remains cooperative: false only requests that the def stop.
-Use a finite total deadline if cleanup must be bounded even for a def that
-ignores cancellation. A stream retains its original owner PID and monitor, so
+Use Port with a finite total deadline if worker termination must be bounded
+even for a def that ignores cancellation; a NIF deadline cannot terminate
+running native work. A Port stream retains its original owner PID and monitor, so
 supervisor replacement cannot retarget a pending stream to the new owner.

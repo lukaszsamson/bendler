@@ -1,8 +1,9 @@
 # Design
 
-Why a Bend program is embedded the way it is, and what the runtime forces.
+Why a Bend program is embedded the way it is. Runtime details here describe
+the supported Bend 2.0.25 toolchain, not a stable upstream ABI.
 
-## The problem: there is no callable def
+## The problem: there is no public native def ABI
 
 Bend's C output is one self-contained program with a `main`. There is no
 `-o x.so`, no flag for a shared library, and no way to name a root other
@@ -23,12 +24,11 @@ inside it, and three properties of the compiler and runtime answer it:
 - **Layout.** Arguments and results of flat datatypes are multi-word and
   register-passed, packed constructors depend on their field shapes, and
   reusable (`+`) values must be reference-count sealed. Building those by
-  hand from C is the fragile part: an early attempt to hand-build a user
-  request constructor broke on packing and was dropped.
+  hand from C would couple the binding to compiler-specific layout decisions.
 - **Reentrancy.** `corpus_eval` assumes the loop thread's allocator lane and
   the runtime's single root, so calls would have to be serialised anyway.
 
-So bendler does not call defs. It keeps Bend's own `main` and event loop and
+So bendler does not call compiled def segments directly from C. It keeps Bend's own `main` and event loop and
 makes the **program** the server: a generated shim declares foreign effects
 and loops, reading a function index, pulling each argument, calling the
 user's def and replying. The user's def is called by Bend code, so inlining,
@@ -61,7 +61,8 @@ Bend's checker guarantees that `A` matches the def's parameter.
 
 The cost of this shape is a hand-off. A direct call would run on the
 scheduler thread itself; here every call crosses a pipe or a wake-up and
-back. That is the price of not depending on compiler internals.
+back. This avoids dependence on direct def entry points and arbitrary user
+layouts, but the codec and embedding patches still use runtime internals.
 
 ## The runtime facts that matter for embedding
 
@@ -92,23 +93,23 @@ back. That is the price of not depending on compiler internals.
   `io_str`, `io_node` and `term_pak`. An effect can park on a file
   descriptor (`io_wait_on`) or run blocking work on a helper thread. Only
   the loop thread runs effects.
-- **Term layout.** A term is a 64-bit word: a 7-bit tag, 16 bits of aux (a
-  constructor or function id) and a 40-bit location. Small constructors are
+- **Term layout.** A term is a tagged 64-bit word. Small constructors are
   packed into the word, larger ones are nodes allocated in a size class, and
   flat datatypes travel unboxed as several registers between segments.
   Base's `String` is a cons list of chars, `List` is cons and nil nodes,
   `Nat` is immediate up to 2^48-1, and `Bool` and `Unit` are packed.
 
-Every value bendler moves is a Base type the runtime lays out itself, built
-exactly the way the runtime's own effects build one. That is the reason the
-C side never has to know the layout of a user constructor, and the reason a
-Bend release that changes the runtime must trigger a rebuild: the C side
+The C codec builds Base values and the controlled `Bytes` and `Dyn` types
+from Bendler's prelude using the runtime's term helpers. C therefore does not
+need arbitrary user-constructor layouts. A Bend release that changes the
+runtime requires compatibility validation and a rebuild: the C side
 uses internals (`io_eff`, `io_str`, `ctr_take`) that carry no ABI promise.
 
 ## The two transports
 
-Both share the same shim, the same codec and the same effects. Only the
-transport header differs.
+Both share the shim and value codec. Transport-specific helpers implement
+delivery, acknowledgements and callback replies; the NIF also needs runtime
+patches and `erl_nif` glue.
 
 - **Port.** Length-prefixed frames on stdin and stdout, with the reads
   parked using `io_wait_on`, so the event loop is never spun. Elixir's
@@ -127,15 +128,22 @@ transport header differs.
 
 ## Compared with Rustler and Zigler
 
+See the [Rustler](https://rustler.hexdocs.pm/readme.html) and
+[Zigler](https://zigler.hexdocs.pm/readme.html) documentation for their build
+and marshalling interfaces. This comparison concerns architecture, not an
+equivalence of lifecycle guarantees.
+
 | | Rustler | Zigler | Bendler |
 |---|---|---|---|
-| Build | a Mix compiler runs `cargo`; the crate exports NIFs via macros | `use Zig` compiles at Elixir compile time and runs `zig` | `use Bendler` builds at compile time: `bend -o shim.c`, then `clang` |
+| Build | Mix-integrated Rust crate compilation | `use Zig` compiles Zig source | `use Bendler` records a Mix compiler request or builds inline: Bend C output, then clang |
 | Load | `@on_load` and `:erlang.load_nif` | the same | the same for the NIF, or a supervised port owner |
 | Function surface | you write `#[rustler::nif]` functions | you write Zig functions and Zigler generates the stubs | parsed from Bend `def` signatures: every exportable def is a function |
 | Term marshalling | `Encoder`/`Decoder`, direct `ERL_NIF_TERM` access | direct `beam.term` access | a frame codec; Bend never touches `ERL_NIF_TERM` |
 | Threading | your code on the scheduler, with dirty flags per function | the same | always off-scheduler: the work happens on Bend's own threads |
-| Failures | panics become exceptions | Zig errors are mapped | the runtime's `_exit` is intercepted; the runtime freezes, the VM lives |
-| Reload | supported with care | supported | not supported |
+| Failures | caught panics can become exceptions | mapped Zig errors can become exceptions | intercepted runtime errors freeze the NIF module; Port errors cost a worker |
+| Reload | requires lifecycle care | requires lifecycle care | replace Port workers; NIF reload is unsupported |
+
+None of these NIF approaches isolates the VM from native memory corruption.
 
 The structural difference is that Rust and Zig functions *are* C functions a
 scheduler can call, while Bend defs are segments of a state machine driven by
@@ -146,16 +154,16 @@ does internally.
 ## Why user datatypes cross as a `Dyn` tree
 
 The compiler decides a constructor's memory layout, flattening fields of
-non-recursive types into the parent node, so C cannot build a user
-constructor. The prelude instead declares `Dyn`, a small tree of leaves
+non-recursive types into the parent node. Constructing arbitrary user values
+in C would require those compiler-specific layouts. The prelude instead declares `Dyn`, a small tree of leaves
 (`DU`, `DF`, `DN`, `DS`, `DB`) and nodes (`DL` for lists, tuples and
 options, `DK{tag, kids}` for constructors and Result), whose constructors C
 can build canonically like the Base ones.
 
 For each user type the build generates two Bend defs into the shim,
 `Bendler.to_T` and `Bendler.of_T`, which convert between `Dyn` and `T`.
-Bend allows neither forward references nor mutual recursion, so each is one
-def recursing on a `Nat` fuel, with the loops over the type's own lists and
+The generator uses one def per converter recursing on a `Nat` fuel, with
+the loops over the type's own lists and
 options inside it. The converters are total: a `Dyn` of the wrong shape,
 which validation already excludes, yields the type's first finite
 constructor. The rules this imposes on a datatype are in [TYPES.md](TYPES.md).
@@ -166,8 +174,8 @@ Base's `Map<a, V>` is a Patricia trie on string keys. Laying one out from C
 would tie bendler to its internals, so the wire form is a list of key and
 value pairs and the generated shim wraps the user's def with
 `Map.from_list` on the way in and `Map.to_list` on the way out. Building
-the trie costs `O(n log n)` string comparisons in Bend, which is the price
-of not knowing the layout. Because the conversion wraps the whole call, a
+the trie requires key traversal and allocation; cost depends on the number
+and lengths of keys. Because the conversion wraps the whole call, a
 `Map` must be a whole parameter or result.
 
 ## Why emitters are template parameters

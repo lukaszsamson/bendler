@@ -49,7 +49,7 @@ pinned toolchain. A release contains its native artifacts and does not need Bend
 or clang at runtime. Artifact paths, fingerprints and lock formats are internal;
 use the Mix tasks rather than manipulating them.
 
-The support baseline is Bend 2.0.20, OTP 28, macOS arm64 and Linux x86_64.
+The support baseline is Bend 2.0.25, OTP 28, macOS arm64 and Linux x86_64.
 CI pins Elixir 1.20.3 and LLVM 21.1.8. Broader Mix dependency version constraints
 are not evidence that every permitted version has been tested. Windows and
 arbitrary Bend/OTP upgrades are not covered. `allow_any_bend` opts out of the

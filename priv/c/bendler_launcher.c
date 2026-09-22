@@ -34,6 +34,16 @@ static int nonblocking(int fd) {
   int flags = fcntl(fd, F_GETFL);
   return flags == -1 ? -1 : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
+static int worker_group(pid_t child) {
+  if (setpgid(child, child) == 0) return 0;
+  int code = errno;
+  // Either side may establish the group first. Darwin can report EPERM
+  // on the redundant operation; accept only the verified intended group.
+  pid_t expected = child == 0 ? getpid() : child;
+  if (code == EPERM && getpgid(child) == expected) return 0;
+  errno = code;
+  return -1;
+}
 typedef struct { unsigned char bytes[65536]; size_t n; } Buffer;
 static int receive(int fd, Buffer* b) {
   ssize_t n = read(fd, b->bytes + b->n, sizeof b->bytes - b->n);
@@ -77,7 +87,7 @@ int main(int argc, char** argv) {
   pid_t child = fork();
   if (child < 0) return transport_error("fork");
   if (child == 0) {
-    if (setpgid(0, 0) || dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0)
+    if (worker_group(0) || dup2(input[0], STDIN_FILENO) < 0 || dup2(output[1], STDOUT_FILENO) < 0)
       _exit(transport_error("worker setpgid/dup2"));
     close(input[0]); close(input[1]); close(output[0]); close(output[1]);
     action.sa_handler = SIG_DFL;
@@ -90,7 +100,7 @@ int main(int argc, char** argv) {
   }
   close(input[0]); close(output[1]);
   // Either side can win the race to setpgid; EACCES means exec already ran.
-  if (setpgid(child, child) && errno != EACCES && errno != ESRCH) {
+  if (worker_group(child) && errno != EACCES && errno != ESRCH) {
     transport_error("parent setpgid");
     (void)kill(child, SIGKILL);
     while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}

@@ -17,7 +17,7 @@ defmodule Bendler.Build do
   alias Bendler.{Gen, Sig}
   require Logger
 
-  @supported_bend "bend 2.0.20"
+  @supported_bend "bend 2.0.25"
   @c_files ~w(bendler_common.h bendler_port.h bendler_nif.h bendler_fn.c bendler_arg.c bendler_reply.c
               bendler_emit.c bendler_ask.c bendler_ask.js bendler_fn.js bendler_arg.js bendler_reply.js bendler_emit.js)
   @launcher "bendler_launcher"
