@@ -159,6 +159,9 @@ defmodule Bendler.NifAskTest do
         end)
       end)
 
+    # a failed assertion must not leave this caller holding the runtime
+    on_exit(fn -> Process.exit(caller, :kill) end)
+
     assert_receive {:handler, handler}, 1000
     mon = Process.monitor(handler)
     Process.exit(caller, :kill)

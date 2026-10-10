@@ -57,7 +57,10 @@ defmodule Bendler.NifEventsTest do
         Process.sleep(:infinity)
       end)
 
-    assert_receive :paused
+    # a failed assertion must not leave this caller holding the runtime
+    on_exit(fn -> Process.exit(pid, :kill) end)
+
+    assert_receive :paused, 1_000
     Process.exit(pid, :kill)
     assert Nif.double(3) == 6
   end
@@ -67,7 +70,7 @@ defmodule Bendler.NifEventsTest do
     # count is export 2 in bend/events.bend after filtering helper defs.
     frame = Bendler.Codec.request(2, [{100_000, :u32}])
     {:ok, handle} = Nif.__bendler_subscribe(frame, Bendler.Nif.deadline(50), ref)
-    assert_receive {:bendler_event, ^ref, 1, _}
+    assert_receive {:bendler_event, ^ref, 1, _}, 1_000
     assert_receive {:bendler_reply, ^ref, {:error, :timeout}}, 1_000
     assert Nif.double(4) == 8
     :ok = Nif.__bendler_cancel(handle)
@@ -77,11 +80,11 @@ defmodule Bendler.NifEventsTest do
     ref = make_ref()
     frame = Bendler.Codec.request(2, [{10, :u32}])
     {:ok, handle} = Nif.__bendler_subscribe(frame, :infinity, ref)
-    assert_receive {:bendler_event, ^ref, 1, _}
+    assert_receive {:bendler_event, ^ref, 1, _}, 1_000
     :ok = Nif.__bendler_ack(handle, 0, true)
     refute_receive {:bendler_event, ^ref, _, _}, 20
     :ok = Nif.__bendler_ack(handle, 1, true)
-    assert_receive {:bendler_event, ^ref, 2, _}
+    assert_receive {:bendler_event, ^ref, 2, _}, 1_000
     :ok = Nif.__bendler_ack(handle, 1, true)
     refute_receive {:bendler_event, ^ref, _, _}, 20
     :ok = Nif.__bendler_cancel(handle)
@@ -104,7 +107,7 @@ defmodule Bendler.NifEventsTest do
     {:ok, running} =
       Nif.__bendler_subscribe(Bendler.Codec.request(2, [{100, :u32}]), :infinity, ref)
 
-    assert_receive {:bendler_event, ^ref, 1, _}
+    assert_receive {:bendler_event, ^ref, 1, _}, 1_000
     queued_ref = make_ref()
 
     {:ok, queued} =

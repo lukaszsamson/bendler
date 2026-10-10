@@ -51,9 +51,9 @@ defmodule Bendler.AskTest do
       end)
     end
 
-    assert_receive {:handler, pid}
+    assert_receive {:handler, pid}, 1_000
     mon = Process.monitor(pid)
-    assert_receive {:DOWN, ^mon, :process, ^pid, _}
+    assert_receive {:DOWN, ^mon, :process, ^pid, _}, 1_000
   end
 
   test "caller death cancels its callback and restarts the occupied worker" do
@@ -67,10 +67,13 @@ defmodule Bendler.AskTest do
         end)
       end)
 
-    assert_receive {:handler, handler}
+    # a failed assertion must not leave this caller holding the runtime
+    on_exit(fn -> Process.exit(caller, :kill) end)
+
+    assert_receive {:handler, handler}, 1_000
     ref = Process.monitor(handler)
     Process.exit(caller, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^handler, _}
+    assert_receive {:DOWN, ^ref, :process, ^handler, _}, 1_000
   end
 
   test "brutal owner death does not orphan a blocked callback" do
@@ -88,10 +91,10 @@ defmodule Bendler.AskTest do
         end
       end)
 
-    assert_receive {:handler, handler}
+    assert_receive {:handler, handler}, 1_000
     ref = Process.monitor(handler)
     Process.exit(Process.whereis(AskPort), :kill)
-    assert_receive {:DOWN, ^ref, :process, ^handler, _}
+    assert_receive {:DOWN, ^ref, :process, ^handler, _}, 1_000
     assert Task.await(task) == :exited
   end
 

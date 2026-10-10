@@ -177,6 +177,9 @@ defmodule Bendler.NifAsyncTest do
         end
       end)
 
+    # a failed assertion must not leave this caller holding the runtime
+    on_exit(fn -> Process.exit(owner, :kill) end)
+
     assert_receive {:child_submitted, {:ok, _handle}}, 1_000
     monitor = Process.monitor(owner)
     Process.exit(owner, :kill)
