@@ -49,7 +49,7 @@ trailing bytes have regression coverage.
 The C codec uses Base's canonical Tuple/Some/None/Done/Fail constructors at
 the foreign-effect boundary, where the compiler boxes specialized values.
 It does not infer arbitrary user-defined constructor layouts. This is
-an internal Bend 2.0.25 ABI, not a stable foreign-library ABI. Rebuild
+an internal Bend 2.0.36 ABI, not a stable foreign-library ABI. Rebuild
 native artifacts when upgrading Bendler or Bend; no mixed-version wire
 negotiation is provided. Generated modules receive matching Elixir specs.
 
@@ -64,7 +64,7 @@ See `test/composite_test.exs` for nested values on both transports, and
 | `Char` | integer code point |
 | `Map<V>`, `Map<&2, V>` | `%{binary => v}` |
 
-**F32.** The supported Bend 2.0.25 toolchain has no `F64`, so the boundary is single precision and says
+**F32.** The supported Bend 2.0.36 toolchain has no `F64`, so the boundary is single precision and says
 so: an Elixir double is rounded to the nearest single on the way in
 (`0.1` arrives as `0.10000000149011612`) and a double past the single
 range (`abs(x) >= 3.4028235677973366e38`) raises `ArgumentError` rather

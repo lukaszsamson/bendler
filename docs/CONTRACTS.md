@@ -153,8 +153,8 @@ raised. Native receive/decoding failures have separate error paths.
 
 | Target | Bend toolchain pin | CPU port status | NIF status |
 |---|---|---|---|
-| macOS arm64 | Bend 2.0.25 archive, SHA-256 pinned in CI | macOS 15 CI target | isolated CI probes; still experimental |
-| Linux x86_64 | Bend 2.0.25 archive, SHA-256 pinned in CI | Ubuntu 24.04 CI target | isolated CI probes; still experimental |
+| macOS arm64 | Bend 2.0.36 archive, SHA-256 pinned in CI | macOS 15 CI target | isolated CI probes; still experimental |
+| Linux x86_64 | Bend 2.0.36 archive, SHA-256 pinned in CI | Ubuntu 24.04 CI target | isolated CI probes; still experimental |
 | Other targets | not packaged by this project | unsupported | unsupported |
 
 See the [CI run history](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml)

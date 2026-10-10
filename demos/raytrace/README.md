@@ -238,7 +238,7 @@ The differences are not spread evenly: they sit on silhouettes, on the
 shadow boundary and where a channel lands exactly on a quantisation
 step, which is where single and double precision disagree about which
 side of a comparison a value falls. This is the same finding as the
-ThumbHash demo's: the pinned Bend 2.0.25 has no `F64`, so a port
+ThumbHash demo's: the pinned Bend 2.0.36 has no `F64`, so a port
 that must match a double-precision reference bit for bit cannot.
 
 The float code itself is verified exactly rather than approximately:
@@ -331,7 +331,7 @@ tile list as `a b = tile(x) go(rest)`, with 300 tiles) ends in a runtime
 owner reports as `{:exit_status, 1}` and a supervisor restarts. Reduced to
 a pure Bend program, this is [#918](https://github.com/bendlang/bend/issues/918),
 fixed upstream in [Bend 2.0.23](https://github.com/bendlang/bend/issues/918#issuecomment-5754216072)
-and included in Bendler's pinned 2.0.25. The measurements above used 2.0.20.
+and included in Bendler's pinned 2.0.36. The measurements above used 2.0.20.
 Both exports fork the tile list
 as a balanced tree, which also helps performance. With it,
 the GPU lane's best for 640x480 is 62 ms in one bang of 300 32-pixel

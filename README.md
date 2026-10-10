@@ -19,7 +19,7 @@ describes what is checked.
 
 | Component | Status |
 |---|---|
-| Bend | 2.0.25 only |
+| Bend | 2.0.36 only |
 | OTP | 28 baseline |
 | macOS | arm64, covered by macOS 15 CI (Metal API baseline) |
 | Linux | x86_64 / Ubuntu 24.04, covered by CI |
@@ -62,7 +62,7 @@ Fib.pow2(20)        #=> 1048576
 
 `bend` emits C and `clang` builds it. Both must be installed (`bend` is
 looked up on `PATH`, then at `~/.bend/bin/bend`; `config :bendler, bend:
-path` overrides). Only Bend 2.0.25 is accepted, because the C side depends
+path` overrides). Only Bend 2.0.36 is accepted, because the C side depends
 on runtime internals; `config :bendler, allow_any_bend: true` lifts the gate.
 CI pins LLVM clang 21.1.8, OTP 28.1 and Elixir 1.20.3. When using upstream
 LLVM on macOS, set `SDKROOT` to `xcrun --sdk macosx --show-sdk-path`; the CI

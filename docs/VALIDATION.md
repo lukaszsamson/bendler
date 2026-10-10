@@ -98,7 +98,7 @@ only in the test environment are not part of that analysis.
 ## CI
 
 `.github/workflows/ci.yml` runs on macOS 15 arm64 and Ubuntu 24.04 x86_64.
-Bend 2.0.25 and LLVM clang 21.1.8 are installed from release archives with
+Bend 2.0.36 and LLVM clang 21.1.8 are installed from release archives with
 pinned SHA-256 checksums, OTP is 28.1, Elixir is 1.20.3, actions are
 commit-pinned and dependencies are locked. See the
 [workflow run history](https://github.com/lukaszsamson/bendler/actions/workflows/ci.yml)

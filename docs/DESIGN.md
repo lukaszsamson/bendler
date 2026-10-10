@@ -1,7 +1,7 @@
 # Design
 
 Why a Bend program is embedded the way it is. Runtime details here describe
-the supported Bend 2.0.25 toolchain, not a stable upstream ABI.
+the supported Bend 2.0.36 toolchain, not a stable upstream ABI.
 
 ## The problem: there is no public native def ABI
 

@@ -87,4 +87,4 @@ Term bendler_ask_run(Env e, Term* f, IoWork* w) {
   return bl_ask_more(e, w);
 }
 #endif
-static void __attribute__((constructor)) bendler_ask_use(void) { io_eff(CID_BENDLER_ASK, bendler_ask_run, 0); }
+static void __attribute__((constructor)) bendler_ask_use(void) { io_eff(CID_BENDLER_ASK, bendler_ask_run); }

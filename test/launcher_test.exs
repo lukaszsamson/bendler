@@ -25,6 +25,16 @@ defmodule Bendler.LauncherTest do
       assert status == 0, log
     end
 
+    # The first exec of a freshly linked binary can take hundreds of ms on
+    # macOS, past the 100 ms deadline below. Each of these exits at once: the
+    # launcher without a worker path, the workers on stdin EOF.
+    for name <- ~w(bendler_launcher worker descendant_worker) do
+      {_, status} =
+        System.cmd("sh", ["-c", ~s("$0" </dev/null 2>/dev/null), Path.join(dir, name)])
+
+      assert status in [64, 74]
+    end
+
     on_exit(fn -> File.rm_rf!(dir) end)
     {:ok, exe: Path.join(dir, "worker")}
   end

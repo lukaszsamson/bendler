@@ -14,4 +14,4 @@ Term bendler_emit_run(Env e, Term* f, IoWork* w) {
   free(b.p);
   return bl_ack_next(e, w);
 }
-static void __attribute__((constructor)) bendler_emit_use(void) { io_eff(CID_BENDLER_EMIT, bendler_emit_run, 0); }
+static void __attribute__((constructor)) bendler_emit_use(void) { io_eff(CID_BENDLER_EMIT, bendler_emit_run); }

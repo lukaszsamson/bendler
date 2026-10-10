@@ -5,4 +5,4 @@ Term bendler_arg_run(Env e, Term* f, IoWork* w) {
   free(spec);
   return t;
 }
-static void __attribute__((constructor)) bendler_arg_use(void) { io_eff(CID_BENDLER_ARG, bendler_arg_run, 0); }
+static void __attribute__((constructor)) bendler_arg_use(void) { io_eff(CID_BENDLER_ARG, bendler_arg_run); }

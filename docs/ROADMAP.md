@@ -19,7 +19,7 @@ and what would have to change first.
   are needed for safe NIF unload and upgrade. Recoverable abandonment of an
   ask additionally needs safe request-level unwinding. A cooperative shutdown
   protocol alone would not guarantee hard interruption of arbitrary work.
-- **`F64`.** The supported Bend 2.0.25 toolchain has no double-precision float, so the boundary is single
+- **`F64`.** The supported Bend 2.0.36 toolchain has no double-precision float, so the boundary is single
   precision. A port that must match a double-precision reference bit for bit
   cannot, as the ThumbHash and raytracer demos both show.
 - **Big naturals.** `Nat` is immediate up to 2^48-1 and larger values are a
@@ -28,7 +28,7 @@ and what would have to change first.
 
 ## Bend toolchain compatibility
 
-The pinned Bend 2.0.25 includes these upstream fixes:
+The pinned Bend 2.0.36 includes these upstream fixes:
 
 - [#909](https://github.com/bendlang/bend/issues/909#issuecomment-5754216536),
   operator sugar involving module-local calls under parent-directory imports,

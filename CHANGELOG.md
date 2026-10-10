@@ -3,7 +3,7 @@
 ## 0.1.0 — Unreleased
 
 The supported surface is the CPU port binding generator,
-frozen in `docs/API.md`. The baseline is Bend 2.0.25 with OTP 28 on macOS
+frozen in `docs/API.md`. The baseline is Bend 2.0.36 with OTP 28 on macOS
 arm64 and Linux x86_64; Windows is not supported.
 
 ### Bindings and build
@@ -16,7 +16,7 @@ arm64 and Linux x86_64; Windows is not supported.
   and C, and toolchain; atomic staged builds; per-application, per-target
   and per-environment artifact paths with a filesystem lock.
 - A release ships its native artifacts and needs neither Bend nor clang.
-- A Bend 2.0.25 compiler gate, with `allow_any_bend` to opt out.
+- A Bend 2.0.36 compiler gate, with `allow_any_bend` to opt out.
 
 ### Types
 
@@ -93,7 +93,7 @@ port and NIF event delivery. Each demo owns its benchmark method and results.
 
 ### CI
 
-macOS 15 arm64 and Ubuntu 24.04 x86_64, with checksum-pinned Bend 2.0.25 and
+macOS 15 arm64 and Ubuntu 24.04 x86_64, with checksum-pinned Bend 2.0.36 and
 LLVM 21.1.8, OTP 28.1, Elixir 1.20.3 and commit-pinned actions. The workflow
 runs the suite, formatting, warnings-as-errors, strict Credo, Dialyzer, docs,
 external-port AddressSanitizer probes, an overload and RSS observation,

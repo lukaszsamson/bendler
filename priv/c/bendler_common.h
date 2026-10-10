@@ -263,19 +263,20 @@ static const char* bl_validate(u32 fn, const u8* p, const u8* end) {
 static Term bl_bytes_as(Env e, u64 cid, const u8* p, u32 n) {
   u32 c = 0;
   while ((1ull << c) < n) c += 1;
-  Loc l = heap_alloc(e, buf_wcls(c));
+  u64 l = heap_alloc(e, buf_wcls(c));
   if (err_seen(e.mem)) bl_fail("bytes allocation failed");
   for (u64 i = 0; i < (1ull << c); i += 1) blk_write(e.mem, false, l, (u32)i, i < n ? p[i] : 0);
   return io_node(e, cid, (Term)n, term_blk(false, c, l));
 }
 static void bl_blk_out(Env e, u32 n, Term blk, BlBuf* b) {
   u64  cap = 1ull << blk_cls(blk);
+  u64  at  = blk_loc(e.mem, blk); // a shared buffer reads through its redirect cell
   if (n > cap) bl_fail("Bytes len past its buffer");
   bl_put8(b, BL_BYTES); bl_put32(b, n);
   u8 chunk[256];
   for (u64 i = 0; i < n; i += 256) {
     u64 m = n - i < 256 ? n - i : 256;
-    for (u64 j = 0; j < m; j += 1) chunk[j] = (u8)blk_read(e.mem, false, term_loc(blk), (u32)(i + j));
+    for (u64 j = 0; j < m; j += 1) chunk[j] = (u8)blk_read(e.mem, false, at, (u32)(i + j));
     bl_put(b, chunk, m);
   }
   blk_free(e, blk);

@@ -20,7 +20,7 @@ the boundary. No arbitrary-user-datatype converter is needed.
 
 ## Run
 
-From the repository root, with Bend 2.0.25 and clang installed:
+From the repository root, with Bend 2.0.36 and clang installed:
 
 ```sh
 mix deps.get
