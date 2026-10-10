@@ -5,7 +5,8 @@ defmodule Bendler.NifAsyncTest do
   alias Bendler.Examples.FibNif
   alias Bendler.Test.QueueNif
 
-  @slow_n 28
+  # about a second on a CI runner: Bend 2.0.36 finished 2^28 in under one
+  @slow_n 29
 
   test "long finite deadlines do not exceed the BEAM receive timeout range" do
     assert 55 ==
@@ -119,7 +120,7 @@ defmodule Bendler.NifAsyncTest do
     drain_reply(cancelled_ref)
     drain_reply(replacement_ref)
     assert_receive {:bendler_reply, ^active_ref, reply}, 15_000
-    assert 268_435_456 == Codec.reply(reply, :slow)
+    assert Bitwise.bsl(1, @slow_n) == Codec.reply(reply, :slow)
     refute_receive {:bendler_reply, ^cancelled_ref, _}, 250
     refute_receive {:bendler_reply, ^replacement_ref, _}, 250
   end
@@ -135,7 +136,9 @@ defmodule Bendler.NifAsyncTest do
     # Cancellation suppresses delivery; it is not hard cancellation of the
     # Bend computation. There is no state-inspection API, so this merely gives
     # the loop an opportunity to claim the first request before cancellation.
-    Process.sleep(20)
+    # 20 ms was too short on a loaded 3-core macOS runner: the request was
+    # still queued, so cancelling it legitimately freed its slot.
+    Process.sleep(200)
     assert :ok = QueueNif.__bendler_cancel(active)
 
     assert {:ok, pending} =
@@ -190,7 +193,7 @@ defmodule Bendler.NifAsyncTest do
     assert :ok = QueueNif.__bendler_cancel(replacement)
 
     assert_receive {:bendler_reply, ^active_ref, reply}, 15_000
-    assert 268_435_456 == Codec.reply(reply, :slow)
+    assert Bitwise.bsl(1, @slow_n) == Codec.reply(reply, :slow)
     refute_receive {:bendler_reply, ^child_ref, _}, 250
     refute_receive {:bendler_reply, ^replacement_ref, _}, 250
   end
