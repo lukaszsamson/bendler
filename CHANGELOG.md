@@ -17,6 +17,12 @@ arm64 and Linux x86_64; Windows is not supported.
   and per-environment artifact paths with a filesystem lock.
 - A release ships its native artifacts and needs neither Bend nor clang.
 - A Bend 2.0.36 compiler gate, with `allow_any_bend` to opt out.
+- The C effects follow the 2.0.36 runtime: `io_eff` registers an effect
+  without a readiness mask, heap locations are plain `u64` (the `Loc`
+  type is gone), and `Bytes` replies read their buffer through `blk_loc`,
+  since blocks may now be shared behind a redirect cell. The NIF patches
+  to the emitted C still match exactly, and the 2.0.36 runtime has no new
+  calls that would exit or signal the BEAM process.
 
 ### Types
 
@@ -99,3 +105,10 @@ runs the suite, formatting, warnings-as-errors, strict Credo, Dialyzer, docs,
 external-port AddressSanitizer probes, an overload and RSS observation,
 port transport stress, a compiler-free consumer release, a real Hex package
 in a fresh consumer, and isolated NIF lifecycle probes.
+
+Timing-sensitive tests tolerate slow runners: launcher fixtures are run
+once before their 100 ms deadline test, since macOS can take hundreds of ms
+on a freshly linked binary's first exec; the NIF cancellation tests give
+the Bend loop time to claim a request; and tests that spawn a caller kill
+it on exit, so one failed assertion cannot hold a module's only lane until
+its deadline and fail the tests after it.
