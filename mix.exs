@@ -35,6 +35,7 @@ defmodule Bendler.MixProject do
 
   defp deps do
     [
+      {:spec_lint, "~> 0.1", only: [:dev, :test], runtime: false},
       {:telemetry, "~> 1.3"},
       {:nimble_csv, "== 1.3.0", only: :test, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
