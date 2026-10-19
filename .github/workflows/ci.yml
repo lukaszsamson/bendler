@@ -69,6 +69,11 @@ jobs:
           MIX_ENV: test
         run: mix compile --warnings-as-errors
 
+      - name: Spec lint
+        env:
+          MIX_ENV: test
+        run: mix spec_lint
+
       - name: Test
         run: mix test --warnings-as-errors
 
