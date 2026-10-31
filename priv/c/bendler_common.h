@@ -30,10 +30,16 @@ static bool bl_is_char(u32 c) { return c < 0x110000 && (c < 0xD800 || c > 0xDFFF
 
 typedef struct { u8* p; u64 len; u64 cap; } BlBuf;
 
-// A program that never mentions List has no CID_CON: its codec refuses lists.
-#ifndef CID_CON
-#define CID_NIL 0
-#define CID_CON 0
+// bendler_fn.c defines the BL_CID_ names from CID(Name) before the first
+// include of this header; a shim that splices another effect first breaks that.
+#ifndef BL_CID_NONE
+#error "bendler_fn.c must be the shim's first effect: it defines the BL_CID_ constructor ids"
+#endif
+
+// A program that never mentions List has no BL_CID_CON: its codec refuses lists.
+#ifndef BL_CID_CON
+#define BL_CID_NIL 0
+#define BL_CID_CON 0
 #define BL_NO_LIST 1
 #endif
 
@@ -263,7 +269,7 @@ static const char* bl_validate(u32 fn, const u8* p, const u8* end) {
 static Term bl_bytes_as(Env e, u64 cid, const u8* p, u32 n) {
   u32 c = 0;
   while ((1ull << c) < n) c += 1;
-  u64 l = heap_alloc(e, buf_wcls(c));
+  u64 l = heap_alloc(e, blk_wcls(false, c));
   if (err_seen(e.mem)) bl_fail("bytes allocation failed");
   for (u64 i = 0; i < (1ull << c); i += 1) blk_write(e.mem, false, l, (u32)i, i < n ? p[i] : 0);
   return io_node(e, cid, (Term)n, term_blk(false, c, l));
@@ -303,26 +309,26 @@ static Term bl_decode(Env e, const char** ty, int depth) {
       Term fields[16];
       for (int i = 0; i < n; i += 1) fields[i] = bl_decode(e, ty, depth + 1);
       t = fields[n - 1];
-      for (int i = n - 2; i >= 0; i -= 1) t = io_node(e, CID_TUPLE, fields[i], t);
+      for (int i = n - 2; i >= 0; i -= 1) t = io_node(e, BL_CID_TUPLE, fields[i], t);
       break;
     }
     case 'M': {
       const char* end = bl_skip_type(*ty);
-      t = tag == BL_NONE ? term_pak(CID_NONE, 0) : io_box(e, CID_SOME, bl_decode(e, ty, depth + 1));
+      t = tag == BL_NONE ? term_pak(BL_CID_NONE, 0) : io_box(e, BL_CID_SOME, bl_decode(e, ty, depth + 1));
       *ty = end; break;
     }
     case 'R': {
       const char* value = bl_skip_type(*ty);
       const char* end = bl_skip_type(value);
       if (tag == BL_OK) *ty = value;
-      t = io_box(e, tag == BL_OK ? CID_DONE : CID_FAIL, bl_decode(e, ty, depth + 1));
+      t = io_box(e, tag == BL_OK ? BL_CID_DONE : BL_CID_FAIL, bl_decode(e, ty, depth + 1));
       *ty = end; break;
     }
     case 'u': case 'f': case 'c': t = (Term)bl_rd32(bl_req); bl_req += 4; break; // F32 bits and Char are bare words
     case 'n': t = (Term)bl_rd64(bl_req); bl_req += 8; break;
     case 's': { u32 n = bl_rd32(bl_req); bl_req += 4; t = io_str(e, (const char*)bl_req, n); bl_req += n; break; }
-    case 'b': t = term_pak(*bl_req++ ? CID_TRUE : CID_FALSE, 0); break;
-    case 't': t = term_pak(CID_UNIT, 0); break;
+    case 'b': t = term_pak(*bl_req++ ? BL_CID_TRUE : BL_CID_FALSE, 0); break;
+    case 't': t = term_pak(BL_CID_UNIT, 0); break;
     case 'y': {
 #ifdef BENDLER_CID_BYTES
       u32 n = bl_rd32(bl_req); bl_req += 4;
@@ -338,8 +344,8 @@ static Term bl_decode(Env e, const char** ty, int depth) {
       Term* items = bl_alloc(sizeof(Term) * n);
       for (u32 i = 0; i < n; i += 1) { const char* t2 = elem; items[i] = bl_decode(e, &t2, depth + 1); }
       *ty = bl_skip_type(elem);
-      t = term_pak(CID_NIL, 0);
-      for (u32 i = n; i > 0; i -= 1) t = io_node(e, CID_CON, items[i - 1], t);
+      t = term_pak(BL_CID_NIL, 0);
+      for (u32 i = n; i > 0; i -= 1) t = io_node(e, BL_CID_CON, items[i - 1], t);
       free(items); break;
     }
     default: bl_fail("bad type spec"); t = 0;
@@ -365,8 +371,8 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
     }
     case 'M': {
       const char* end = bl_skip_type(*ty);
-      if (term_aux(x) == CID_NONE) bl_put8(b, BL_NONE);
-      else if (term_aux(x) == CID_SOME) {
+      if (term_aux(x) == BL_CID_NONE) bl_put8(b, BL_NONE);
+      else if (term_aux(x) == BL_CID_SOME) {
         Term fields[1]; spare_free(e, cls_fit(1), ctr_take(e, x, 1, fields));
         bl_put8(b, BL_SOME); bl_encode(e, ty, fields[0], b, depth + 1);
       } else bl_fail("bad Maybe constructor");
@@ -375,8 +381,8 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
     case 'R': {
       const char* value = bl_skip_type(*ty);
       const char* end = bl_skip_type(value);
-      bool ok = term_aux(x) == CID_DONE;
-      if (!ok && term_aux(x) != CID_FAIL) bl_fail("bad Result constructor");
+      bool ok = term_aux(x) == BL_CID_DONE;
+      if (!ok && term_aux(x) != BL_CID_FAIL) bl_fail("bad Result constructor");
       if (ok) *ty = value;
       Term fields[1]; spare_free(e, cls_fit(1), ctr_take(e, x, 1, fields));
       bl_put8(b, ok ? BL_OK : BL_FAIL); bl_encode(e, ty, fields[0], b, depth + 1);
@@ -386,7 +392,7 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
     case 'f': bl_put8(b, BL_F32); bl_put32(b, (u32)x); break;
     case 'c': bl_put8(b, BL_CHR); bl_put32(b, (u32)x); break; // the host checks the range
     case 'n': bl_put8(b, BL_NAT); bl_put64(b, (u64)x); break;
-    case 'b': bl_put8(b, BL_BOOL); bl_put8(b, term_aux(x) == CID_TRUE); break;
+    case 'b': bl_put8(b, BL_BOOL); bl_put8(b, term_aux(x) == BL_CID_TRUE); break;
     case 't': bl_put8(b, BL_UNIT); break;
     case 'y':
 #ifdef BENDLER_CID_BYTES
@@ -409,7 +415,7 @@ static void bl_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
       bl_put8(b, BL_LIST);
       u64 at = b->len; bl_put32(b, 0);
       u32 n = 0;
-      while (term_aux(x) == CID_CON) {
+      while (term_aux(x) == BL_CID_CON) {
         Term fb[2];
         spare_free(e, cls_fit(2), ctr_take(e, x, 2, fb));
         const char* t2 = elem;
@@ -440,8 +446,8 @@ static bool bl_has_dyn(const char* spec) { return strchr(spec, 'D') != NULL; }
 
 #ifdef BENDLER_CID_DK
 static Term bl_dyn_list(Env e, const Term* items, u32 n) {
-  Term t = term_pak(CID_NIL, 0);
-  for (u32 i = n; i > 0; i -= 1) t = io_node(e, CID_CON, items[i - 1], t);
+  Term t = term_pak(BL_CID_NIL, 0);
+  for (u32 i = n; i > 0; i -= 1) t = io_node(e, BL_CID_CON, items[i - 1], t);
   return t;
 }
 
@@ -520,7 +526,7 @@ static u32 bl_dyn_word(Term x, u64 cid) {
 }
 // the next cell of a Dyn list: its head, advancing `*l`
 static Term bl_dyn_next(Env e, Term* l) {
-  if (term_aux(*l) != CID_CON) bl_fail("a Dyn list shorter than its type");
+  if (term_aux(*l) != BL_CID_CON) bl_fail("a Dyn list shorter than its type");
   Term fb[2];
   spare_free(e, cls_fit(2), ctr_take(e, *l, 2, fb));
   *l = fb[1];
@@ -551,7 +557,7 @@ static void bl_dyn_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
       bl_put8(b, BL_LIST);
       u64 at = b->len; bl_put32(b, 0);
       u32 n = 0; Term l = f[0];
-      while (term_aux(l) == CID_CON) {
+      while (term_aux(l) == BL_CID_CON) {
         const char* t2 = elem;
         bl_dyn_encode(e, &t2, bl_dyn_next(e, &l), b, depth + 1);
         n += 1;
@@ -572,7 +578,7 @@ static void bl_dyn_encode(Env e, const char** ty, Term x, BlBuf* b, int depth) {
       const char* end = bl_skip_type(*ty);
       Term f[1]; bl_dyn_take(e, x, BENDLER_CID_DL, 1, f);
       Term l = f[0];
-      if (term_aux(l) == CID_CON) { bl_put8(b, BL_SOME); bl_dyn_encode(e, ty, bl_dyn_next(e, &l), b, depth + 1); }
+      if (term_aux(l) == BL_CID_CON) { bl_put8(b, BL_SOME); bl_dyn_encode(e, ty, bl_dyn_next(e, &l), b, depth + 1); }
       else bl_put8(b, BL_NONE);
       *ty = end; break;
     }

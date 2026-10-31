@@ -23,7 +23,7 @@ File.write!(Path.join(build, "shim_asan.c"), asan_source)
 
 flags =
   Enum.map(~w(BYTES DU DF DN DS DB DL DK), fn name ->
-    [_, cid] = Regex.run(~r/^#define (CID_\S*BENDLER_#{name}) \d+$/m, source)
+    [_, cid] = Regex.run(~r/^#define (CID_(?:\S*_)?bendler_#{name}) \d+$/mi, source)
     "-DBENDLER_CID_#{name}=#{cid}"
   end)
 

@@ -136,12 +136,17 @@ defmodule Bendler.Port do
         :binary,
         :exit_status,
         {:packet, 4},
+        # Bend 2.0.38+ reads runtime options only between +RTS and -RTS, and
+        # BENDRTS before them: the worker's options are bendler's alone.
+        env: [{~c"BENDRTS", false}],
         args: [
           exe,
+          "+RTS",
           "--threads",
           Integer.to_string(threads),
           "--gpu",
-          gpu_arg(Keyword.get(opts, :gpu, :off))
+          gpu_arg(Keyword.get(opts, :gpu, :off)),
+          "-RTS"
         ]
       ])
 

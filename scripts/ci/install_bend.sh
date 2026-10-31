@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # Install exactly the Bend release supported by Bendler. The checksums below
-# are the release archives published by bendlang/bend for v2.0.36.
+# are the release archives published by bendlang/bend for v2.0.39.
 set -euo pipefail
 
 : "${BEND_TARGET:?set BEND_TARGET to linux-x64 or darwin-arm64}"
 : "${BEND_SHA256:?set BEND_SHA256 to the archive SHA-256}"
 
-readonly version=2.0.36
+readonly version=2.0.39
 readonly archive="bend-${version}-${BEND_TARGET}.tar.gz"
 readonly url="https://github.com/bendlang/bend/releases/download/v${version}/${archive}"
 readonly destination="${RUNNER_TEMP:?RUNNER_TEMP is required}/bend"
 
 case "${BEND_TARGET}" in
   linux-x64)
-    readonly expected_sha256=02089dc0eed0fd5fd6d73c74cc9cffcb2c6638dd3b02ae83f7b8cc57fbe381ba
+    readonly expected_sha256=6cf462fd8f70b094a4950ebb709a9c4ffd8f1d1189d9cedf1fd63cd5d041c7ab
     ;;
   darwin-arm64)
-    readonly expected_sha256=2876687ceb0aba836abc98b3f62c8fc9fb612d124ae2af6814d5ec937760878d
+    readonly expected_sha256=d4aaef68de545727429ce83b9e88ff3273bf068df599e3542e446755b5f3d83a
     ;;
   *)
     echo "unsupported Bend target: ${BEND_TARGET}" >&2

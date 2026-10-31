@@ -119,7 +119,7 @@ defmodule Bendler.CodecBudgetTest do
       Port.open({:spawn_executable, launcher}, [
         :binary,
         :exit_status,
-        args: [exe, "--threads", "1", "--gpu", "off"]
+        args: [exe, "+RTS", "--threads", "1", "--gpu", "off", "-RTS"]
       ])
 
     try do

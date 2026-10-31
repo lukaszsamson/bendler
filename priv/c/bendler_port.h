@@ -124,7 +124,7 @@ static Term bl_ack_more(Env e, IoWork* w) {
         memmove(bl_in + base, bl_in + base + 5, bl_in_len - base - 5);
         bl_in_len -= 5;
         bl_await_ack = false;
-        return term_pak(v ? CID_TRUE : CID_FALSE, 0);
+        return term_pak(v ? BL_CID_TRUE : BL_CID_FALSE, 0);
       }
     }
     if (!bl_in_read()) return io_wait_on(w, 0, POLLIN, 0, bl_ack_more);

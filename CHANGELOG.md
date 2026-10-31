@@ -3,7 +3,7 @@
 ## 0.1.0 — Unreleased
 
 The supported surface is the CPU port binding generator,
-frozen in `docs/API.md`. The baseline is Bend 2.0.36 with OTP 28 on macOS
+frozen in `docs/API.md`. The baseline is Bend 2.0.39 with OTP 28 on macOS
 arm64 and Linux x86_64; Windows is not supported.
 
 ### Bindings and build
@@ -16,13 +16,26 @@ arm64 and Linux x86_64; Windows is not supported.
   and C, and toolchain; atomic staged builds; per-application, per-target
   and per-environment artifact paths with a filesystem lock.
 - A release ships its native artifacts and needs neither Bend nor clang.
-- A Bend 2.0.36 compiler gate, with `allow_any_bend` to opt out.
-- The C effects follow the 2.0.36 runtime: `io_eff` registers an effect
-  without a readiness mask, heap locations are plain `u64` (the `Loc`
-  type is gone), and `Bytes` replies read their buffer through `blk_loc`,
-  since blocks may now be shared behind a redirect cell. The NIF patches
-  to the emitted C still match exactly, and the 2.0.36 runtime has no new
-  calls that would exit or signal the BEAM process.
+- A Bend 2.0.39 compiler gate, with `allow_any_bend` to opt out.
+- The C effects follow the 2.0.39 runtime: `io_eff` registers an effect
+  without a readiness mask, heap locations are plain `u64`, a byte buffer's
+  word class is `blk_wcls(false, c)`, and `Bytes` replies read their buffer
+  through `blk_loc`, since blocks may be shared behind a redirect cell.
+- Effects name constructor ids with `CID(Name)`, the interface Bend
+  substitutes in an effect's C, instead of its internal `CID_` macro
+  spellings, which 2.0.39 changed from upper case to the declared case.
+  `bendler_fn.c` defines Bendler's `BL_CID_` names for the shared headers;
+  the prelude's `Bytes` and `Dyn` ids, which `CID()` cannot reach through
+  an import alias, are read from the emitted C in either spelling.
+- Runtime options go between `+RTS` and `-RTS`, as Bend 2.0.38 requires:
+  the port worker's `--threads` and `--gpu`, the NIF's `bend_main` call
+  and the build's `--gpu-build`. `BENDRTS` is cleared for port workers and
+  builds and never read by a NIF runtime, whose environment is the VM's.
+- The NIF patching also disarms the runtime's memory-fault trap, which
+  re-raises its signal, and its SIGPIPE on a broken standard stream, which
+  now falls through to the runtime's error and freezes the module. The
+  safety check refuses any surviving `raise` or `kill` as well as
+  `sigaction`, `signal`, `_exit` and `abort`.
 
 ### Types
 
@@ -43,7 +56,8 @@ arm64 and Linux x86_64; Windows is not supported.
   deadline, KILL after 200 ms, then reaping and output draining. Worker
   exit codes are preserved across a stdin close with pending input.
 - Documented exit codes: 0 clean EOF, 1 runtime error, 65 protocol error,
-  74 transport error.
+  74 transport error. A memory fault ends the worker by its signal, which
+  the launcher reports as 128 + the signal (139 for SIGSEGV).
 - Parent- and child-side `setpgid` permission failures are accepted only when the
   worker is verifiably in its intended process group, avoiding a spurious
   startup failure without ignoring genuine group-setup errors.
@@ -99,7 +113,7 @@ port and NIF event delivery. Each demo owns its benchmark method and results.
 
 ### CI
 
-macOS 15 arm64 and Ubuntu 24.04 x86_64, with checksum-pinned Bend 2.0.36 and
+macOS 15 arm64 and Ubuntu 24.04 x86_64, with checksum-pinned Bend 2.0.39 and
 LLVM 21.1.8, OTP 28.1, Elixir 1.20.3 and commit-pinned actions. The workflow
 runs the suite, formatting, warnings-as-errors, strict Credo, Dialyzer, docs,
 external-port AddressSanitizer probes, an overload and RSS observation,

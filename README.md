@@ -19,7 +19,7 @@ describes what is checked.
 
 | Component | Status |
 |---|---|
-| Bend | 2.0.36 only |
+| Bend | 2.0.39 only |
 | OTP | 28 baseline |
 | macOS | arm64, covered by macOS 15 CI (Metal API baseline) |
 | Linux | x86_64 / Ubuntu 24.04, covered by CI |
@@ -62,7 +62,7 @@ Fib.pow2(20)        #=> 1048576
 
 `bend` emits C and `clang` builds it. Both must be installed (`bend` is
 looked up on `PATH`, then at `~/.bend/bin/bend`; `config :bendler, bend:
-path` overrides). Only Bend 2.0.36 is accepted, because the C side depends
+path` overrides). Only Bend 2.0.39 is accepted, because the C side depends
 on runtime internals; `config :bendler, allow_any_bend: true` lifts the gate.
 CI pins LLVM clang 21.1.8, OTP 28.1 and Elixir 1.20.3. When using upstream
 LLVM on macOS, set `SDKROOT` to `xcrun --sdk macosx --show-sdk-path`; the CI
@@ -264,7 +264,7 @@ both backends, with transport-specific delivery helpers and NIF glue:
 - **NIF**: the emitted C is patched (`main` → `bend_main`, the runtime's
   signal handlers dropped, `_exit` → `bendler_die`) and linked as a shared
   library with a small `erl_nif` entry table. Checked initialization pins
-  the library for the VM lifetime, then runs `bend_main` with `--threads N`.
+  the library for the VM lifetime, then runs `bend_main` with `+RTS --threads N --gpu off -RTS`.
   Normal-scheduler admission precedes dirty validation and copying; native
   completion sends a message. Waiting uses an ordinary Elixir `receive`.
 
@@ -304,8 +304,9 @@ user constructors, so C does not depend on their arbitrary layouts.
   (a segfault) still kills the VM, as with any NIF. An abandoned or failed
   NIF ask freezes its module the same way, because there is no safe native
   request unwind. The port backend has the process boundary instead: a
-  runtime error exits the worker (1), a protocol error exits 65, a transport
-  error 74, and a supervisor restarts it.
+  runtime error exits the worker (1), a memory fault ends it by its signal
+  (reported as 128 + the signal, 139 for SIGSEGV), a protocol error exits 65,
+  a transport error 74, and a supervisor restarts it.
 - **NIF admission precedes dirty scheduling.** `max_waiting` counts staged,
   queued and running requests.
 - **NIF runtimes are pinned until VM exit.** A retained callback-bearing

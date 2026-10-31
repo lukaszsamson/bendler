@@ -64,7 +64,7 @@ defmodule Bendler.NifInitCheck do
 
     ids =
       Enum.flat_map(~w(BYTES DU DF DN DS DB DL DK), fn name ->
-        case Regex.run(~r/^#define (CID_\S*BENDLER_#{name}) \d+$/m, source) do
+        case Regex.run(~r/^#define (CID_(?:\S*_)?bendler_#{name}) \d+$/mi, source) do
           [_, cid] -> ["-DBENDLER_CID_#{name}=#{cid}"]
           nil -> []
         end

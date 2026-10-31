@@ -17,7 +17,7 @@ defmodule Bendler.Build do
   alias Bendler.{Gen, Sig}
   require Logger
 
-  @supported_bend "bend 2.0.36"
+  @supported_bend "bend 2.0.39"
   @c_files ~w(bendler_common.h bendler_port.h bendler_nif.h bendler_fn.c bendler_arg.c bendler_reply.c
               bendler_emit.c bendler_ask.c bendler_ask.js bendler_fn.js bendler_arg.js bendler_reply.js bendler_emit.js)
   @launcher "bendler_launcher"
@@ -325,7 +325,7 @@ defmodule Bendler.Build do
       build_dir
     )
 
-    if gpu, do: run!(staged, ["--gpu-build"], build_dir)
+    if gpu, do: run!(staged, ["+RTS", "--gpu-build", "-RTS"], build_dir)
     # Bend exits successfully without writing a device program when the
     # toolkit is installed but no GPU is visible (for example a hosted VM).
     # Publish the CPU-capable executable without trying to rename a missing
@@ -419,12 +419,15 @@ defmodule Bendler.Build do
   # The C names of the prelude's constructors, as the emitted source spells
   # them (they depend on the import path), for the codec: Bytes when an
   # export carries bytes, every Dyn constructor when one carries a datatype.
+  # An effect's CID(Name) cannot reach them through the prelude's import
+  # alias, so they are read from the C. Bend 2.0.39 keeps the declared case
+  # (`..._bendler_Bytes`) where earlier releases upper-cased it.
   defp prelude_flags!(c_path, uses) do
     c = File.read!(c_path)
     wanted = if(uses.bytes, do: ["BYTES"], else: []) ++ if(uses.data, do: @dyn_ctors, else: [])
 
     Enum.map(wanted, fn name ->
-      case Regex.run(~r/^#define (CID_\S*BENDLER_#{name}) \d+$/m, c) do
+      case Regex.run(~r/^#define (CID_(?:\S*_)?bendler_#{name}) \d+$/mi, c) do
         [_, macro] ->
           "-DBENDLER_CID_#{name}=#{macro}"
 
@@ -511,8 +514,9 @@ defmodule Bendler.Build do
 
   defp relativize(path), do: if(String.starts_with?(path, "."), do: path, else: "./" <> path)
 
+  # BENDRTS would add runtime options to the `--gpu-build` run
   defp run!(cmd, args, dir) do
-    case System.cmd(cmd, args, cd: dir, stderr_to_stdout: true) do
+    case System.cmd(cmd, args, cd: dir, stderr_to_stdout: true, env: [{"BENDRTS", nil}]) do
       {out, 0} ->
         if out =~ "Error", do: Logger.warning(out)
         :ok

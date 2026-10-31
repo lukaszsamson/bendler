@@ -12,7 +12,7 @@ File.write!(
   String.replace(source, preserve, "#define PRESERVE(A)")
 )
 
-[_, bytes] = Regex.run(~r/^#define (CID_\S*BENDLER_BYTES) \d+$/m, source)
+[_, bytes] = Regex.run(~r/^#define (CID_(?:\S*_)?bendler_BYTES) \d+$/mi, source)
 exe = Path.join(build, "ask_asan")
 
 args =

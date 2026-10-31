@@ -753,7 +753,15 @@ defmodule Bendler.Gen do
        1},
       {~r/^  sigaction\(SIG[A-Z]+, &sa, NULL\);$/m, "", 2},
       {~r/^  signal\(SIGPIPE, SIG_IGN\);$/m, "", 1},
-      {~r/^  _exit\(1\);$/m, "  bendler_die(1);", 1}
+      {~r/^  _exit\(1\);$/m, "  bendler_die(1);", 1},
+      # the memory-fault trap re-raises its signal; it is never installed
+      # here (its sigactions are gone above), so this only keeps it inert
+      {~r/^  signal\(sig, SIG_DFL\);\n  raise\(sig\);$/m, "  bendler_die(1);", 1},
+      # an EPIPE on a standard stream would raise SIGPIPE at the VM; fall
+      # through to the runtime's error instead, which freezes this module
+      {~r/^    signal\(SIGPIPE, SIG_DFL\);\n    raise\(SIGPIPE\);$/m, "", 1},
+      # BENDRTS is the VM's environment, not this runtime's options
+      {~r/getenv\("BENDRTS"\) != NULL \? getenv\("BENDRTS"\) : ""/, ~s(""), 1}
     ]
 
     body =
@@ -772,7 +780,14 @@ defmodule Bendler.Gen do
     # only in cli_fail, whose arguments bendler controls)
     survivors =
       Enum.flat_map(
-        [~r/^\s*sigaction\(/m, ~r/^\s*signal\(/m, ~r/\b_exit\(/, ~r/^\s*abort\(/m],
+        [
+          ~r/^\s*sigaction\(/m,
+          ~r/^\s*signal\(/m,
+          ~r/\b_exit\(/,
+          ~r/^\s*abort\(/m,
+          ~r/\braise\(/,
+          ~r/\bkill\(/
+        ],
         &Regex.scan(&1, body)
       )
 

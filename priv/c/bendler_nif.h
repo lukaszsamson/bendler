@@ -225,13 +225,13 @@ static Term bl_ack_more(Env e, IoWork* w) {
       c->event_pending = false;
     }
     pthread_mutex_unlock(&bl_lock);
-    return term_pak(CID_FALSE, 0);
+    return term_pak(BL_CID_FALSE, 0);
   }
   if (c->ack_ready) {
     bool go = c->ack_go;
     c->ack_ready = false; c->event_pending = false;
     pthread_mutex_unlock(&bl_lock);
-    return term_pak(go ? CID_TRUE : CID_FALSE, 0);
+    return term_pak(go ? BL_CID_TRUE : BL_CID_FALSE, 0);
   }
   // Translate milliseconds to the runtime's nanosecond tick. Recheck at
   // most 1s later, avoiding overflow for very distant finite deadlines.
@@ -317,8 +317,8 @@ static void* bl_thread(void* arg) {
   bl_die("injected failure after native thread creation");
 #endif
   char threads[16]; snprintf(threads, sizeof threads, "%d", bl_threads);
-  char* argv[] = {"bend", "--threads", threads, "--gpu", "off", NULL};
-  bend_main(5, argv);
+  char* argv[] = {"bend", "+RTS", "--threads", threads, "--gpu", "off", "-RTS", NULL};
+  bend_main(7, argv);
   bl_die("bend main returned");
   return NULL;
 }

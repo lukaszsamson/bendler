@@ -1,7 +1,7 @@
 # Design
 
 Why a Bend program is embedded the way it is. Runtime details here describe
-the supported Bend 2.0.36 toolchain, not a stable upstream ABI.
+the supported Bend 2.0.39 toolchain, not a stable upstream ABI.
 
 ## The problem: there is no public native def ABI
 
@@ -84,7 +84,8 @@ layouts, but the codec and embedding patches still use runtime internals.
   ordinary worker exit; for the NIF the call is rerouted to `bendler_die`,
   which freezes the module instead of taking the VM down.
 - **`io_loop` is the entry point and effects are the FFI.** `main` parses
-  `--threads` and `--gpu`, calls `corpus_setup` and then `io_loop`, which
+  `--threads` and `--gpu` between `+RTS` and `-RTS` (and from `BENDRTS`,
+  which Bendler clears for its workers), calls `corpus_setup` and then `io_loop`, which
   evaluates `main`'s task and drives an event loop: each computation runs
   its pure code, in parallel, up to its next IO request, and the loop
   dispatches that request to a registered effect. A def whose body is
@@ -113,8 +114,8 @@ patches and `erl_nif` glue.
 
 - **Port.** Length-prefixed frames on stdin and stdout, with the reads
   parked using `io_wait_on`, so the event loop is never spun. Elixir's
-  `{:packet, 4}` matches the 4-byte prefix, and `--threads N` is an
-  ordinary command-line argument. A separate POSIX launcher owns the worker
+  `{:packet, 4}` matches the 4-byte prefix, and `+RTS --threads N -RTS` is
+  an ordinary command line. A separate POSIX launcher owns the worker
   process group so a deadline or owner death terminates and reaps it. This
   is the default and the recommended backend: it keeps the OS process
   boundary, so a runtime error, a freeze or a hard kill costs a worker, not
